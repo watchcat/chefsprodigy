@@ -1,0 +1,21 @@
+{
+  "title": "Beef Pho",
+  "description": "Slow-simmered Vietnamese noodle soup.",
+  "servings": 4,
+  "prep_time_minutes": 30,
+  "cook_time_minutes": 360,
+  "ingredients": [
+    { "raw_text": "1 kg beef bones", "metric_amount": 1000, "unit": "g", "canonical_id": "beef_bones", "is_specialty": false },
+    { "raw_text": "3 star anise", "metric_amount": 3, "unit": "pcs", "canonical_id": "star_anise", "is_specialty": true },
+    { "raw_text": "2 tbsp fish sauce", "metric_amount": 30, "unit": "ml", "canonical_id": "fish_sauce", "is_specialty": true },
+    { "raw_text": "400 g flat rice noodles", "metric_amount": 400, "unit": "g", "canonical_id": "rice_noodles", "is_specialty": false },
+    { "raw_text": "salt to taste", "metric_amount": null, "unit": "to_taste", "canonical_id": "salt", "is_specialty": false }
+  ],
+  "instructions": [
+    { "step_number": 1, "text": "Roast the bones for 30 minutes.", "timer_seconds": 1800 },
+    { "step_number": 2, "text": "Simmer with spices for 6 hours.", "timer_seconds": 21600 },
+    { "step_number": 3, "text": "Cook noodles, assemble, and serve.", "timer_seconds": null }
+  ],
+  "tags": ["vietnamese", "soup"],
+  "is_public": true
+}

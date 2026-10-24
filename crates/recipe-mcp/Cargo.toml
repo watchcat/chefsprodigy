@@ -1,0 +1,26 @@
+[package]
+name = "recipe-mcp"
+description = "MCP tools and resources exposing the recipe node to AI agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+recipe-core = { workspace = true }
+recipe-db = { workspace = true }
+recipe-scraper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+rmcp = { workspace = true, features = ["client"] }
+image = { workspace = true }

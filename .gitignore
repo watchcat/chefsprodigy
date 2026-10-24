@@ -1,0 +1,16 @@
+/target
+/data
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+.env
+.env.*
+!.env.example
+# agent scratch and tool caches
+.work/
+.manus/
+tasks/
+inputs/
+.claude/*
+!.claude/launch.json

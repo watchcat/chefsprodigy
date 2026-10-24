@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recipe Node Board</title>
+<style>
+:root{--bg:#f4f2ec;--panel:#ffffff;--ink:#1f2a26;--muted:#66736e;--line:#e2ded4;--accent:#173f36;--chip:#eef3f0;
+ --backlog:#9a7b2f;--in-progress:#2b6cb0;--review:#8a4fb5;--done:#2f855a;--code:#f0ede5;--ok:#2f855a;--err:#c53030}
+@media (prefers-color-scheme:dark){:root{--bg:#141817;--panel:#1d2321;--ink:#e8ebe9;--muted:#9aa7a1;--line:#2d3633;--accent:#8fd1bd;--chip:#26302d;--code:#262d2a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
+header.top{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:baseline;padding:20px 24px 8px}
+header.top h1{margin:0;font-size:22px;letter-spacing:-.01em}
+header.top .meta{color:var(--muted);font-size:13px}
+header.top input{margin-left:auto;min-width:220px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);font:inherit}
+.board{display:grid;grid-template-columns:repeat(4,minmax(260px,1fr));gap:16px;padding:12px 24px 32px}
+@media (max-width:1100px){.board{grid-template-columns:repeat(2,minmax(260px,1fr))}}
+@media (max-width:640px){.board{grid-template-columns:1fr;padding:12px 16px 24px}header.top{padding:16px}}
+.col{background:color-mix(in srgb,var(--panel) 70%,var(--bg));border:1px solid var(--line);border-radius:12px;padding:12px;min-height:200px;transition:background .15s}
+.col.over{background:color-mix(in srgb,var(--c) 10%,var(--bg));border-color:var(--c)}
+.col h2{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.08em;display:flex;align-items:center;gap:8px;padding-left:10px;border-left:3px solid var(--c)}
+.col-backlog{--c:var(--backlog)}.col-in-progress{--c:var(--in-progress)}.col-review{--c:var(--review)}.col-done{--c:var(--done)}
+.count{background:var(--chip);color:var(--muted);border-radius:999px;padding:1px 8px;font-size:12px;font-weight:600}
+.cards{display:flex;flex-direction:column;gap:10px;min-height:60px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.card[draggable=true]{cursor:grab}.card.dragging{opacity:.4}.card.drop-before{box-shadow:0 -3px 0 0 var(--c)}.card.drop-after{box-shadow:0 3px 0 0 var(--c)}
+.card header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.card .id{font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--c)}
+.size{font-size:11px;font-weight:700;border-radius:6px;padding:2px 7px;background:var(--chip);color:var(--muted)}
+.size-L{background:#fde8e8;color:#9b2c2c}.size-M{background:#fdf3d9;color:#8a5a00}.size-S{background:#e3f6ea;color:#276749}
+@media (prefers-color-scheme:dark){.size-L{background:#4a2323;color:#f8b4b4}.size-M{background:#473a14;color:#f6d47a}.size-S{background:#1f3d2b;color:#9ae6b4}}
+.card h3{margin:0 0 6px;font-size:15px;line-height:1.3}
+.card p{margin:0 0 6px;color:var(--muted);font-size:13.5px}
+.col-done .card p{display:none}.col-done .card{padding:9px 12px}.col-done .card h3{font-size:14px;margin:0}
+details{margin-top:6px;font-size:13px}summary{cursor:pointer;color:var(--accent);font-weight:600}
+details ul{margin:6px 0 0;padding-left:18px;color:var(--muted)}
+code{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);padding:1px 5px;border-radius:4px}
+.empty{color:var(--muted);font-style:italic;font-size:13px;margin:4px 0}
+.card.hidden{display:none}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.show{opacity:1}#toast.err{background:var(--err);color:#fff}
+.badge{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border-radius:6px;padding:2px 7px;background:var(--chip);color:var(--muted)}
+.badge.live{background:#e3f6ea;color:#276749}
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>Recipe Node Board</h1>
+  <span class="badge" id="mode"></span>
+  <span class="meta" id="meta"></span>
+  <input type="search" id="q" placeholder="Filter stories…" aria-label="Filter stories">
+</header>
+<main class="board" id="board"></main>
+<div id="toast" role="status"></div>
+<script>
+const LIVE = false;
+let board = {"columns": [{"name": "Backlog", "stories": [{"id": "RN-21", "title": "Lossy WebP covers", "size": "S/M", "body": ["Covers are lossless today (about 1 MB for a 1200 px image). Decide between a", "lower max width, a lossy encoder via `libwebp` bindings, or keeping lossless."], "acceptance": ["a BBC Good Food import stores a cover under 200 KB, or the decision is recorded in `docs/ARCHITECTURE_AND_SCHEMAS.md`."]}, {"id": "RN-24", "title": "Mealie backup against a real archive", "size": "S", "body": ["Field names in `recipe-scraper/src/mealie.rs` follow Mealie's table names from memory."], "acceptance": ["a real Mealie 1.x backup imports with zero `errors`."]}, {"id": "RN-25", "title": "MCP resources", "size": "M", "body": ["Expose `recipe://{id}` and `recipe://manifest` as MCP resources next to the tools."], "acceptance": ["`resources/list` and `resources/read` work over stdio in `crates/recipe-mcp/tests/server.rs`."]}, {"id": "RN-28", "title": "Federation auth and rate limiting", "size": "M", "body": ["Federation endpoints are public by design but unthrottled."], "acceptance": ["tower-http rate limit on `/api/v1/federation/*`; documented in `docs/MCP_AND_API_SPEC.md`."]}, {"id": "RN-30", "title": "Backup and restore of the node", "size": "M", "body": ["Export the SQLite file plus images as a zip and import it back."], "acceptance": ["round trip preserves ids, hashes, and covers."]}, {"id": "RN-31", "title": "Idle memory measurement in CI", "size": "S", "body": ["The < 20 MB RSS goal has never been measured (sandbox blocked `ps`)."], "acceptance": ["a script in `scripts/` prints RSS after startup and 50 requests; number recorded in README."]}]}, {"name": "In Progress", "stories": []}, {"name": "Review", "stories": []}, {"name": "Done", "stories": [{"id": "RN-60", "title": "Backfill source language for existing recipes", "size": "S", "body": ["Offline detector (`langdetect.rs`: Cyrillic letter signals for ru/uk, stopword scoring for en/nl/de/fr/es/it) applied at import time and by `backfill-language` (CLI + background pass at `serve` startup); the model is asked only when the heuristic is unsure; backfill never touches `updated_at`/`content_hash`. 7 new tests."], "acceptance": []}, {"id": "RN-59", "title": "UI: translated recipe content and corrections", "size": "M", "body": ["Library, recipe detail, and shopping-list requests now send the selected UI language as `lang`. Localized titles, tags, ingredient labels, and shopping labels render from the server response. Recipe detail shows translation provenance, permits a source-wording toggle, displays a translation loading state, and offers `#/recipe/{id}/translation` to save ordered human wording corrections through the documented translation endpoint; retained human corrections show a stale-source hint after source edits.", "Verified in-browser 2026-10-24 via `scripts/devbuild.sh`: a Dutch `Hollandse stamppot` card rendered in Russian, opened with its human-translation provenance, toggled to its Dutch source and back, and saved a corrected Russian ingredient. The correction survived a reload; after a source-recipe `PUT`, it remained visible with the Russian stale-source hint. Browser console had no errors.", "Follow-up verified in-browser 2026-10-24 after updating the static PWA shell: the saved Torchiette recipe rendered its Russian title, ingredient wording, and method after selecting Russian, and remained Russian after reload with `html[lang=\"ru\"]` and `localStorage[\"ui.lang\"] = \"ru\"`."], "acceptance": []}, {"id": "RN-57", "title": "MCP: language parameter on tools", "size": "S", "body": ["`search_recipes`, `get_recipe_details`, `build_smart_shopping_list` accept `language`; end-to-end stdio test with a fake translator."], "acceptance": []}, {"id": "RN-56", "title": "Backend: localized canonical ingredient labels", "size": "S", "body": ["`canonical_terms` cache + `TranslationService::labels` (batches of 100, humanized fallback, no-LLM safe); `canonical_label` on ingredients of localized recipes and on shopping-list lines (`?lang=`/`Accept-Language`)."], "acceptance": []}, {"id": "RN-55", "title": "Backend: search across translations", "size": "S", "body": ["`q` matches `recipes_fts` and `translations_fts` (union, best rank, one row per recipe) in both search and count; `lang` on `GET /recipes` makes summaries use an existing translation and adds `translation_lang`."], "acceptance": []}, {"id": "RN-58", "title": "UI: message bundles and language switcher", "size": "M", "body": ["The embedded PWA now ships parity-checked `en`, `ru`, and `nl` message bundles, with bundle-backed static UI text, an English fallback, and a header switcher persisted in `localStorage[\"ui.lang\"]`. The active language updates `<html lang>` and drives `Intl` number, unit, duration, and timer formatting; the static PWA shell caches all three bundles.", "Verified in-browser 2026-10-24 via `scripts/devbuild.sh`: the switcher changed the live library from English to Russian and Dutch, set `html[lang]` to `ru`/`nl`, persisted through a reload, and returned to unchanged English. `scripts/i18n-check.py` passed bundle parity and renderer-string checks."], "acceptance": []}, {"id": "RN-54", "title": "Backend: translation store and service", "size": "M", "body": ["`recipe_translations` + `translations_fts` (triggers) + `canonical_terms` tables; `TranslationService` translates lazily on `GET /recipes/{id}?lang=` (or `Accept-Language`), caches per language, coalesces concurrent requests, regenerates stale machine translations, keeps human ones (`PUT/DELETE /recipes/{id}/translations/{lang}`), validates reply lengths and falls back to the source on failure. `GET /i18n/languages`. 20 new tests."], "acceptance": []}, {"id": "RN-53", "title": "Backend: source language on recipes", "size": "S", "body": ["`recipes.language` (migration `20261024000001_i18n.sql`), normalized BCP-47 primary subtag; detected from JSON-LD `inLanguage` / `<html lang>`, LLM drafts (`language` field), photo extraction; exposed on recipes and summaries; settable via create/update."], "acceptance": []}, {"id": "RN-52", "title": "Fix editor heading collapsing to one letter per line", "size": "S", "body": ["Bug: on `#/recipe/{id}/edit` the title and eyebrow rendered one character per line. The heading grid's cover column was `auto`, so the cover image's 1200 px natural width took the whole row and left the title track at 0 px. Fixed 2026-10-24 with `fit-content(14rem)` for that column and a capped preview width; verified with and without a cover and at 375 px."], "acceptance": []}, {"id": "RN-51", "title": "Verify photo import with real photos", "size": "S", "body": ["Verified 2026-10-23 with MiniMax-M3: a Marley Spoon card (front with hero photo + back with Dutch text) imports with the full title, 12 ingredients, 6 steps with timers, servings 2, cook 30 min, and the front photo as cover; an English card (\"Willow Chicken in Black Bean Sauce\") also imported. Fixes found on the way: `classification`/`type` keys for photo kinds, notes mentioning a dish photo promote a text page to cover, equipment filtered from ingredients, nested `times` objects, synthesized title when the card side has no title.", "Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pasta name sometimes misread (\"torchiatelle\")."], "acceptance": []}, {"id": "RN-47", "title": "Dev tooling: devbuild.sh, .env, per-toolchain target dirs", "size": "S", "body": ["`scripts/devbuild.sh` builds, runs, seeds and opens the browser; loads `.env` (template `.env.example`, git-ignored); uses `target/rustc-<version>/` per toolchain and refuses a stale `DEVELOPER_DIR`."], "acceptance": []}, {"id": "RN-48", "title": "MiniMax-M3 default and lenient model-reply parsing", "size": "M", "body": ["`LLM_MODEL=minimax/MiniMax-M3` via `.env`; rig reads vendor variables unless `LLM_API_KEY` overrides. Replies with missing/renamed fields, string ranges, time phrases, decimal commas and unit spellings now parse; gateway errors and rejected replies are logged."], "acceptance": []}, {"id": "RN-49", "title": "Navbar logo and PWA icons", "size": "S", "body": ["PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and service-worker shell updated."], "acceptance": []}, {"id": "RN-50", "title": "Kanban tooling", "size": "S", "body": ["`scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`)."], "acceptance": []}, {"id": "RN-39", "title": "UI: shopping list builder", "size": "M", "body": ["The PWA now has a `#/shopping` builder, linked from the library and primary navigation. It loads local recipes into an accessible multi-select basket with per-recipe serving inputs and optional comma-separated pantry exclusions. It calls `POST /api/v1/shopping-list`, separates basic groceries from specialty items, and persists the basket, pantry text, and independently checked grocery rows in `localStorage`.", "Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: Beef Pho and Quick Noodle Bowl produced an aggregated `600 g` Rice Noodles line for two recipes, Fish Sauce appeared under Specialty items, and Salt was excluded through the pantry field. A checked Rice Noodles row remained checked after a page reload and rebuilt list; browser console had no errors."], "acceptance": []}, {"id": "RN-46", "title": "UI: import from photos", "size": "M", "body": ["The import dialog now includes a responsive From photo tab with a camera-capable 1\u20136 image picker, local thumbnails, size/count feedback, a privacy disclosure, and visible analysis progress. It posts repeated multipart `photos` plus `is_public` to `POST /api/v1/import/photo`, renders errors inline, and opens a created recipe on success.", "Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a readable recipe-card JPEG imported through MiniMax-M3 as Lemon Herb Orzo and opened in detail; a logo image returned an inline 422 no-recipe message; an isolated no-model node returned the inline 503 vision-capability message. Browser console had no errors."], "acceptance": []}, {"id": "RN-45", "title": "MCP: photo_paths on import_recipe", "size": "S", "body": ["`import_recipe` accepts `photo_paths`; unreadable paths are reported in the tool error. End-to-end test over stdio with a fake vision extractor."], "acceptance": []}, {"id": "RN-44", "title": "Backend: photo import endpoint and vision extraction", "size": "M", "body": ["`POST /api/v1/import/photo` live: EXIF-oriented 1600 px JPEG normalization, one vision call (`PhotoExtraction`), lenient parsing, cover from the first dish photo, and 422/503 paths. The first MiniMax-M3 browser run is verified under RN-46."], "acceptance": []}, {"id": "RN-41", "title": "UI: cover image upload in the editor", "size": "S", "body": ["The editor accepts JPEG, PNG, and WebP images, then posts the selected file as multipart field `file` to `PUT /api/v1/recipes/{id}/image` after a recipe exists. It waits for the returned recipe and routes to its detail page, where the converted cover is rendered.", "Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a JPEG uploaded through the Beef Pho editor and the returned WebP cover rendered on both the recipe detail page and library card."], "acceptance": []}, {"id": "RN-35", "title": "UI: manual recipe editor", "size": "M", "body": ["The PWA now has `#/new` and `#/recipe/{id}/edit` views with accessible create/edit forms for title, description, servings, times, tags, provenance, visibility, normalized ingredients, specialty flags, and ordered timed steps. Ingredient and step rows are dynamically addable/removable; successful saves use the documented `POST` or `PUT` endpoint and API failures render inline.", "Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: Browser Lemon Orzo was created from the form and opened in detail; the seeded Beef Pho recipe round-tripped all 5 ingredients, 5 specialty controls, 3 ordered instructions, and 3 timer controls through `PUT`; dynamic controls added a sixth ingredient and fourth step without persisting on Cancel. Browser console had no errors."], "acceptance": []}, {"id": "RN-43", "title": "Drop the unused legacy vector mark", "size": "S", "body": ["Removed the unreferenced 150 KB legacy vector app mark from the embedded bundle. The local PNG icon set remains the sole browser and manifest branding source, and the frontend scope now documents that arrangement.", "Verified 2026-10-22: the static bundle is 176 KB and a repository-source scan finds no retired asset filename."], "acceptance": []}]}]};
+const GENERATED = "2026-10-24";
+const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const inline = s => s.split('`').map((p,i) => i%2 ? `<code>${esc(p)}</code>` : esc(p)).join('');
+const key = n => n.toLowerCase().replace(/ /g,'-');
+const toastEl = document.getElementById('toast');
+let toastTimer;
+function toast(msg, err){ toastEl.textContent = msg; toastEl.className = 'show' + (err ? ' err' : ''); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.className = '', err ? 4000 : 1500); }
+
+function render(){
+  const total = board.columns.reduce((n,c) => n + c.stories.length, 0);
+  document.getElementById('mode').textContent = LIVE ? 'live · drag to move' : 'static export';
+  document.getElementById('mode').className = 'badge' + (LIVE ? ' live' : '');
+  document.getElementById('meta').textContent = `${total} stories · ${LIVE ? 'docs/KANBAN.md' : 'generated ' + GENERATED + ' from docs/KANBAN.md'}`;
+  document.getElementById('board').innerHTML = board.columns.map(col => `
+    <section class="col col-${key(col.name)}" data-col="${esc(col.name)}" aria-label="${esc(col.name)}">
+      <h2>${esc(col.name)} <span class="count">${col.stories.length}</span></h2>
+      <div class="cards">${col.stories.map(s => `
+        <article class="card" data-id="${s.id}" ${LIVE ? 'draggable="true"' : ''} data-search="${esc([s.id, s.title, ...s.body, ...s.acceptance].join(' ').toLowerCase())}">
+          <header><span class="id">${s.id}</span>${s.size ? `<span class="size size-${s.size.split('/')[0]}">${esc(s.size)}</span>` : ''}</header>
+          <h3>${inline(s.title)}</h3>
+          ${s.body.map(b => `<p>${inline(b)}</p>`).join('')}
+          ${s.acceptance.length ? `<details><summary>Acceptance</summary><ul>${s.acceptance.map(a => `<li>${inline(a)}</li>`).join('')}</ul></details>` : ''}
+        </article>`).join('') || '<p class="empty">Nothing here</p>'}</div>
+    </section>`).join('');
+  applyFilter();
+  if (LIVE) wireDnd();
+}
+
+const q = document.getElementById('q');
+function applyFilter(){
+  const t = q.value.trim().toLowerCase();
+  document.querySelectorAll('.card').forEach(c => c.classList.toggle('hidden', !!t && !c.dataset.search.includes(t)));
+  document.querySelectorAll('.col').forEach(col => { col.querySelector('.count').textContent = col.querySelectorAll('.card:not(.hidden)').length; });
+}
+q.addEventListener('input', applyFilter);
+
+// ---- drag and drop (live mode)
+let dragId = null;
+function clearMarks(){ document.querySelectorAll('.drop-before,.drop-after').forEach(c => c.classList.remove('drop-before','drop-after')); document.querySelectorAll('.col.over').forEach(c => c.classList.remove('over')); }
+function wireDnd(){
+  document.querySelectorAll('.card').forEach(card => {
+    card.addEventListener('dragstart', e => { dragId = card.dataset.id; card.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragId); });
+    card.addEventListener('dragend', () => { card.classList.remove('dragging'); clearMarks(); dragId = null; });
+  });
+  document.querySelectorAll('.col').forEach(col => {
+    col.addEventListener('dragover', e => {
+      if (!dragId) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+      clearMarks(); col.classList.add('over');
+      const target = e.target.closest('.card');
+      if (target && target.dataset.id !== dragId) {
+        const r = target.getBoundingClientRect();
+        target.classList.add(e.clientY < r.top + r.height/2 ? 'drop-before' : 'drop-after');
+      }
+    });
+    col.addEventListener('dragleave', e => { if (!col.contains(e.relatedTarget)) clearMarks(); });
+    col.addEventListener('drop', async e => {
+      e.preventDefault();
+      const id = dragId || e.dataTransfer.getData('text/plain');
+      const to = col.dataset.col;
+      const cards = [...col.querySelectorAll('.card')].filter(c => c.dataset.id !== id);
+      const target = e.target.closest('.card');
+      let index = cards.length;
+      if (target && target.dataset.id !== id) {
+        const r = target.getBoundingClientRect();
+        index = cards.indexOf(target) + (e.clientY < r.top + r.height/2 ? 0 : 1);
+      }
+      clearMarks();
+      await move(id, to, index);
+    });
+  });
+}
+async function move(id, to, index){
+  try {
+    const res = await fetch('/api/move', { method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({ id, to, index }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    board = data; render(); toast(`${id} → ${to} · saved to KANBAN.md`);
+  } catch (err) { toast('Move failed: ' + err.message, true); }
+}
+if (LIVE) {
+  // Pick up edits made to the Markdown file in an editor.
+  setInterval(async () => { try { const r = await fetch('/api/board'); const d = await r.json(); if (JSON.stringify(d) !== JSON.stringify(board)) { board = d; render(); } } catch {} }, 3000);
+}
+render();
+</script>
+</body>
+</html>

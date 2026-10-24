@@ -1,0 +1,26 @@
+[package]
+name = "recipe-scraper"
+description = "Schema.org JSON-LD parser, htmd sanitizer, rig Extractor fallback and Mealie backup importer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+recipe-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+scraper = { workspace = true }
+htmd = { workspace = true }
+reqwest = { workspace = true }
+rig-core = { workspace = true }
+image = { workspace = true }
+zip = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

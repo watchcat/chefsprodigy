@@ -1,0 +1,16 @@
+[package]
+name = "recipe-core"
+description = "Domain models, DTOs, JSON Schemas and content_hash logic for the Standalone Recipe Node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+sha2 = { workspace = true }
+ulid = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

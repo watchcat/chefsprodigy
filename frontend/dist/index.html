@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#173f36">
+  <meta name="description" content="Chef's Prodigy is your private, AI-native recipe library.">
+  <link rel="icon" href="/assets/logo-128.png" type="image/png" sizes="128x128">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/styles.css">
+  <title>Chef's Prodigy</title>
+</head>
+<body>
+  <a class="skip-link" href="#main-content" data-i18n="Skip to recipe library">Skip to recipe library</a>
+
+  <header class="site-header">
+    <div class="page-shell header-inner">
+      <a class="brand" href="#/" aria-label="Chef's Prodigy recipe library" data-i18n-attr="aria-label:Chef's Prodigy recipe library">
+        <img class="brand-logo" src="/assets/logo-128.png" srcset="/assets/logo-128.png 1x, /assets/logo-192.png 2x" alt="Chef's Prodigy logo" data-i18n-attr="alt:Chef's Prodigy logo" width="44" height="44">
+        <span class="brand-lockup">
+          <span class="brand-name">Chef's Prodigy</span>
+          <span class="brand-tagline" data-i18n="A thoughtful recipe node">A thoughtful recipe node</span>
+        </span>
+      </a>
+
+      <nav class="primary-nav" aria-label="Primary navigation" data-i18n-attr="aria-label:Primary navigation">
+        <a class="nav-link" id="library-link" href="#/" data-i18n="Library">Library</a>
+        <a class="nav-link" id="shopping-link" href="#/shopping" data-i18n="Shopping list">Shopping list</a>
+        <label class="language-switcher">
+          <span class="visually-hidden" data-i18n="Language">Language</span>
+          <select id="ui-language" aria-label="Language" data-i18n-attr="aria-label:Language">
+            <option value="en">English</option>
+            <option value="ru">Русский</option>
+            <option value="nl">Nederlands</option>
+          </select>
+        </label>
+        <button class="button button-secondary button-compact" type="button" data-action="new-recipe" data-i18n="New recipe">New recipe</button>
+        <button class="button button-secondary button-compact" id="install-app-button" type="button" data-action="install-app" aria-label="Install Chef's Prodigy" data-i18n="Install" data-i18n-attr="aria-label:Install Chef's Prodigy" hidden>Install</button>
+        <button class="button button-primary button-compact" type="button" data-action="open-import" data-i18n="Import recipe">Import recipe</button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main-content" class="page-shell main-content" tabindex="-1"></main>
+
+  <footer class="site-footer">
+    <div class="page-shell footer-inner">
+      <p data-i18n="Chef's Prodigy keeps your recipes on your own node.">Chef's Prodigy keeps your recipes on your own node.</p>
+      <a href="#/" data-i18n="Recipe library">Recipe library</a>
+    </div>
+  </footer>
+
+  <dialog class="import-dialog" id="import-dialog" aria-labelledby="import-dialog-title">
+    <div class="dialog-surface">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">Build your library</p>
+          <h2 id="import-dialog-title">Import a recipe</h2>
+          <p class="dialog-description">Bring in a recipe from a webpage, your own text, or photos of a recipe you want to keep.</p>
+        </div>
+        <button class="icon-button" type="button" data-action="close-import" aria-label="Close import dialog">Close</button>
+      </div>
+
+      <div class="import-tabs" role="tablist" aria-label="Recipe import source">
+        <button class="tab-button is-active" type="button" role="tab" id="url-tab" aria-selected="true" aria-controls="url-import-panel" data-action="switch-import-tab" data-tab="url">From a link</button>
+        <button class="tab-button" type="button" role="tab" id="text-tab" aria-selected="false" aria-controls="text-import-panel" data-action="switch-import-tab" data-tab="text">From text</button>
+        <button class="tab-button" type="button" role="tab" id="photo-tab" aria-selected="false" aria-controls="photo-import-panel" data-action="switch-import-tab" data-tab="photo">From photo</button>
+        <button class="tab-button" type="button" role="tab" id="mealie-tab" aria-selected="false" aria-controls="mealie-import-panel" data-action="switch-import-tab" data-tab="mealie">Mealie backup</button>
+      </div>
+
+      <section id="url-import-panel" role="tabpanel" aria-labelledby="url-tab" data-import-panel="url">
+        <form id="url-import-form" class="import-form">
+          <label class="field-label" for="import-url">Recipe URL</label>
+          <input class="text-input" id="import-url" name="url" type="url" inputmode="url" placeholder="https://example.com/recipe" autocomplete="url" required>
+          <p class="field-hint">Chef's Prodigy will look for recipe metadata first, then use the importer when needed.</p>
+          <label class="check-field">
+            <input name="isPublic" type="checkbox">
+            <span>Make this recipe public for future federation</span>
+          </label>
+          <p class="form-status" data-form-status="url" aria-live="polite"></p>
+          <div class="form-actions">
+            <button class="button button-secondary" type="button" data-action="close-import">Cancel</button>
+            <button class="button button-primary" type="submit">Import from link</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="text-import-panel" role="tabpanel" aria-labelledby="text-tab" data-import-panel="text" hidden>
+        <form id="text-import-form" class="import-form">
+          <label class="field-label" for="import-text">Recipe text</label>
+          <textarea class="text-input text-area" id="import-text" name="text" rows="9" placeholder="Paste a recipe, social caption, or handwritten transcription here…" required></textarea>
+          <label class="field-label optional-label" for="origin-url">Original link <span>optional</span></label>
+          <input class="text-input" id="origin-url" name="originUrl" type="url" inputmode="url" placeholder="https://example.com/original-recipe">
+          <label class="check-field">
+            <input name="isPublic" type="checkbox">
+            <span>Make this recipe public for future federation</span>
+          </label>
+          <p class="form-status" data-form-status="text" aria-live="polite"></p>
+          <div class="form-actions">
+            <button class="button button-secondary" type="button" data-action="close-import">Cancel</button>
+            <button class="button button-primary" type="submit">Import recipe text</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="photo-import-panel" role="tabpanel" aria-labelledby="photo-tab" data-import-panel="photo" hidden>
+        <form id="photo-import-form" class="import-form">
+          <div class="photo-privacy-note">
+            <strong>Private by design.</strong> Your selected photos are sent once to the vision model configured on this node. They are discarded after extraction; only the resulting recipe and an optional WebP cover are saved.
+          </div>
+          <label class="field-label" for="photo-import-files">Recipe photos</label>
+          <input class="file-input" id="photo-import-files" name="photos" type="file" accept="image/*" capture="environment" multiple aria-label="Recipe photos" aria-describedby="photo-import-hint photo-import-privacy" data-role="photo-picker" required>
+          <p class="field-hint" id="photo-import-hint">Choose 1–6 recipe pages, cards, handwritten notes, or dish photos. Each image can be up to 20 MB.</p>
+          <p class="visually-hidden" id="photo-import-privacy">Selected photos are sent to the vision model configured on this node and are not retained after extraction.</p>
+          <div class="photo-selection" id="photo-selection" aria-live="polite" aria-atomic="true" hidden>
+            <p class="photo-selection-summary" data-photo-selection-summary></p>
+            <ul class="photo-preview-grid" data-photo-preview-list aria-label="Selected photo previews"></ul>
+          </div>
+          <label class="check-field">
+            <input name="isPublic" type="checkbox">
+            <span>Make this recipe public for future federation</span>
+          </label>
+          <div class="photo-import-progress" data-photo-import-progress role="status" aria-live="polite" hidden>
+            <span class="photo-progress-spinner" aria-hidden="true"></span>
+            <p data-photo-import-progress-label>Preparing your photos…</p>
+          </div>
+          <p class="form-status" data-form-status="photo" aria-live="polite"></p>
+          <div class="form-actions">
+            <button class="button button-secondary" type="button" data-action="close-import">Cancel</button>
+            <button class="button button-primary" type="submit">Import photos</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="mealie-import-panel" role="tabpanel" aria-labelledby="mealie-tab" data-import-panel="mealie" hidden>
+        <form id="mealie-import-form" class="import-form">
+          <label class="field-label" for="mealie-backup-file">Mealie backup archive</label>
+          <input class="file-input" id="mealie-backup-file" name="backup" type="file" accept=".zip,application/zip,application/x-zip-compressed" aria-label="Mealie backup archive" aria-describedby="mealie-backup-hint" required>
+          <p class="field-hint" id="mealie-backup-hint">Choose the <code>.zip</code> backup exported from Mealie. Recipes and included cover images will be imported to this node.</p>
+          <p class="form-status" data-form-status="mealie" aria-live="polite"></p>
+          <div id="mealie-import-report" class="import-report" aria-live="polite" hidden></div>
+          <div class="form-actions">
+            <button class="button button-secondary" type="button" data-action="close-import">Cancel</button>
+            <button class="button button-primary" type="submit">Import backup</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </dialog>
+
+  <dialog class="confirm-dialog" id="delete-dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-description">
+    <div class="dialog-surface">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">Remove from your node</p>
+          <h2 id="delete-dialog-title">Delete recipe?</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="cancel-delete" aria-label="Close delete confirmation">Close</button>
+      </div>
+      <p class="confirm-copy" id="delete-dialog-description">This permanently removes <strong id="delete-recipe-title">this recipe</strong> and its stored cover image from your node. This cannot be undone.</p>
+      <p class="form-status" id="delete-dialog-status" aria-live="polite"></p>
+      <div class="form-actions">
+        <button class="button button-secondary" type="button" data-action="cancel-delete">Keep recipe</button>
+        <button class="button button-danger" type="button" data-action="confirm-delete">Delete recipe</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <noscript>
+    <div class="noscript-notice">Chef's Prodigy needs JavaScript to browse your local recipe library.</div>
+  </noscript>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

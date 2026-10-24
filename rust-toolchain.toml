@@ -1,0 +1,4 @@
+# rustup users get a current stable compiler; the Nix dev shell (../flake.nix) is the primary environment.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
