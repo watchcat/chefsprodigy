@@ -12,8 +12,9 @@ pub mod hash;
 pub mod models;
 
 pub use dto::{
-    LocalizedRecipe, ManifestEntry, RecipeInput, RecipeSummary, RecipeTranslation, SearchQuery,
-    TranslationInfo, TranslationInput, TranslationOrigin, normalize_lang,
+    FederatedRecipe, LocalizedRecipe, ManifestEntry, ManifestTranslation, RecipeInput,
+    RecipeSummary, RecipeTranslation, SearchQuery, TranslationInfo, TranslationInput,
+    TranslationOrigin, normalize_lang,
 };
 pub use error::CoreError;
 pub use hash::calculate_content_hash;

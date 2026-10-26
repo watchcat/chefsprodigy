@@ -72,6 +72,8 @@ data directory must be writable by uid 65532. The hosting design around this ima
 | `LLM_MODEL` | rig catalog reference, e.g. `minimax/MiniMax-M3`, `anthropic/claude-haiku-4-5`, `ollama/llama3.2` |
 | `MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`, ... | the vendor's key; `LLM_API_KEY` is a generic override |
 | `NODE_API_KEY` | the owner's secret: protects writes, imports and live translations on the REST API (login at `/api/v1/auth/login` or send it as a bearer token) and enables `/mcp`. Unset = single-user mode, everyone is the owner |
+| `NODE_PUBLIC_URL` | public base URL behind a reverse proxy, e.g. `https://jacob.example.com`: published as `node_url` in the federation manifest, and its host is accepted on `/mcp` automatically |
+| `NODE_MCP_ALLOWED_HOSTS` | explicit `Host` allowlist for `/mcp` (comma separated); default: loopback names plus the host of `NODE_PUBLIC_URL` |
 | `NODE_PORT`, `NODE_HOST`, `NODE_DATA_DIR`, `NODE_CHEF_NAME`, `NODE_AUTHOR_DID` | server settings |
 
 ## Using it
@@ -94,6 +96,8 @@ data directory must be writable by uid 65532. The hosting design around this ima
   ```
 
   Remote clients use `http://host:8080/mcp` with `Authorization: Bearer $NODE_API_KEY`.
+  Behind a reverse proxy set `NODE_PUBLIC_URL`; its host is then accepted on `/mcp` without
+  listing it in `NODE_MCP_ALLOWED_HOSTS`.
 
 ## Development
 

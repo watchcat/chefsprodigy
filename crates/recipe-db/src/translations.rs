@@ -98,6 +98,21 @@ impl Db {
         Ok(r.rows_affected() > 0)
     }
 
+    /// Every stored translation of `recipe_id`, ordered by language.
+    pub async fn list_translations(
+        &self,
+        recipe_id: &str,
+    ) -> Result<Vec<RecipeTranslation>, DbError> {
+        let rows: Vec<TranslationRow> = sqlx::query_as(
+            "SELECT lang, title, description, ingredients, instructions, tags, origin, source_updated_at, created_at, updated_at \
+             FROM recipe_translations WHERE recipe_id = ? ORDER BY lang",
+        )
+        .bind(recipe_id)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(RecipeTranslation::try_from).collect()
+    }
+
     /// Languages a recipe has translations for.
     pub async fn translation_langs(&self, recipe_id: &str) -> Result<Vec<String>, DbError> {
         Ok(sqlx::query_scalar(

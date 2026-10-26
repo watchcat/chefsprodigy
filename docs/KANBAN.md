@@ -16,10 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
-`NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
-- Acceptance: API tests: manifest lists a translation with its own `updated_at` after `PUT /recipes/{id}/translations/ru` without the recipe's `updated_at` changing; federated recipe carries it; public recipes only; allowlist derived from the URL.
-
 ### RN-74 · SSRF guard on user-supplied URL fetches (S)
 Harden `recipe-scraper` (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images, used by `ImportService::import_url`): resolve the hostname first and refuse loopback, link-local incl. cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918, CGNAT `100.64/10`, `fc00::/7`, multicast/unspecified addresses and any scheme other than `http`/`https`; re-check every redirect hop and connect to the checked address. A builder flag `allow_private_hosts` exists only for tests with local servers. Spec: `docs/SPEC-hosted-platform.md` §6.
 - Acceptance: tests show `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a public URL redirecting to a private address are refused with a clear error; public URLs still import; the model client is unaffected.
@@ -104,6 +100,12 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
+`NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
+- Acceptance: API tests: manifest lists a translation with its own `updated_at` after `PUT /recipes/{id}/translations/ru` without the recipe's `updated_at` changing; federated recipe carries it; public recipes only; allowlist derived from the URL.
+
+- Done 2026-10-26: `NODE_PUBLIC_URL` (validated absolute http(s) URL, trailing slash dropped) is published as manifest `node_url`; the default `/mcp` allowlist is loopback plus the URL's `host[:port]` (`default_mcp_allowed_hosts_with`), an explicit `NODE_MCP_ALLOWED_HOSTS` still wins. `ManifestEntry.translations: [{lang, origin, stale, updated_at}]` comes from one join over public recipes; `GET /federation/recipes/{id}` returns `FederatedRecipe` (recipe flat + `translations: [RecipeTranslation]`). SSE headers: rmcp 3.6 already sends `Cache-Control: no-cache` and `X-Accel-Buffering: no` on every event stream, so a regression test pins it instead of new code. 11 new tests (199 total), clippy and rustfmt clean.
 
 ### RN-63 · Dockerfile, `healthcheck` subcommand and image publishing (S)
 Multi-stage `Dockerfile` (rust:1.97-slim-bookworm → distroless `cc-debian12:nonroot`, BuildKit cache mounts, `.dockerignore`), new `node-server healthcheck [--port] [--host]` subcommand (`crates/node-server/src/health.rs`: raw loopback HTTP GET of `/api/v1/health`, 2 s timeout, exit 0/1, port from `NODE_PORT`), image env `NODE_HOST=0.0.0.0 NODE_PORT=8080 NODE_DATA_DIR=/data TOKIO_WORKER_THREADS=2`, `/data` owned by uid 65532, `.github/workflows/docker.yml` building and smoke-testing on main/PRs and publishing `v*` tags to `ghcr.io/watchcat/chefsprodigy` (`<version>`, `<major.minor>`, `latest`). README and CLAUDE.md document it.
