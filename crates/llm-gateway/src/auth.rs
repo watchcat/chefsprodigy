@@ -19,7 +19,12 @@ pub fn new_token() -> String {
 
 /// SHA-256 of a token, hex: what the database stores.
 pub fn hash_token(token: &str) -> String {
-    hex(&Sha256::digest(token.as_bytes()))
+    sha256_hex(token.as_bytes())
+}
+
+/// SHA-256 of arbitrary bytes, hex.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
 }
 
 fn hex(bytes: &[u8]) -> String {

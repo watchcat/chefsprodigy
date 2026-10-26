@@ -253,8 +253,14 @@ Status: v1 shipped 2026-10-27 (RN-66): `/anthropic/v1/messages` and `/minimax/v1
 passthrough (on the `/anthropic` prefix MiniMax models route to MiniMax, others to Anthropic),
 hub tokens (`x-api-key` or bearer, stored hashed), `usage_daily` rows, one retry on 5xx/429,
 two in-flight calls per hub, `stream: true` → 501, admin `POST/GET /admin/hubs` and
-`GET /admin/usage`, `llm-gateway add-hub` CLI, `healthcheck` subcommand. Quotas, the
-canonical-JSON cache, BYOK and the remaining admin endpoints are RN-68.
+`GET /admin/usage`, `llm-gateway add-hub` CLI, `healthcheck` subcommand. v2 shipped
+2026-10-27 (RN-68): free-tier quotas as below (per-hub columns, `PATCH /admin/hubs/{name}`),
+429 `quota_exceeded` before any upstream call, the canonical-JSON reply cache (sorted keys,
+integral floats as integers, `temperature` 0 and no streaming only, 2xx only, 30-day TTL,
+1 MB bodies, LRU by `last_hit` above `GATEWAY_CACHE_MAX_ENTRIES`; `x-gateway-cache:
+hit|miss|bypass`), BYOK keys encrypted with XChaCha20-Poly1305 under `GATEWAY_MASTER_KEY`
+(`POST /admin/hubs/{name}/byok`, `DELETE …/byok/{vendor}`; BYOK hubs skip the platform
+quota, usage still recorded), `DELETE /admin/hubs/{name}` and `GET /admin/cache/stats`.
 
 Endpoints (data plane, hub token in `x-api-key` or `Authorization: Bearer`):
 - `POST /anthropic/v1/messages`: Messages-format passthrough (MiniMax, Anthropic). `stream: true`

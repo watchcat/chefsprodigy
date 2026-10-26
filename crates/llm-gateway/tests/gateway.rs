@@ -137,11 +137,19 @@ fn admin_request(
     }
 }
 
+/// A request that bypasses the reply cache (temperature 0.5), so tests counting
+/// vendor calls or quota see every request; the cache tests set temperature 0.
 fn prompt(model: &str) -> Value {
     json!({
-        "model": model, "max_tokens": 256, "temperature": 0,
+        "model": model, "max_tokens": 256, "temperature": 0.5,
         "messages": [{"role": "user", "content": "Normalize: 2 eggs"}]
     })
+}
+
+fn deterministic(model: &str) -> Value {
+    let mut body = prompt(model);
+    body["temperature"] = json!(0);
+    body
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -573,4 +581,436 @@ async fn an_unconfigured_vendor_answers_503_and_bad_bodies_400() {
     let (status, _, _) = send(&app, req).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(vendor.calls().is_empty());
+}
+
+// ---------------------------------------------------------------- v2 (RN-68): quotas
+
+/// Set quota fields on a hub through the admin API.
+async fn patch_hub(app: &Router, name: &str, patch: Value) -> (StatusCode, Value) {
+    let (status, _, body) = send(
+        app,
+        admin_request(
+            "PATCH",
+            &format!("/admin/hubs/{name}"),
+            Some("admin-secret"),
+            Some(patch),
+        ),
+    )
+    .await;
+    (status, body)
+}
+
+async fn call_as(app: &Router, token: &str, body: &Value) -> (StatusCode, HeaderMap, Value) {
+    send(
+        app,
+        messages_request("/anthropic/v1/messages", Some(("x-api-key", token)), body),
+    )
+    .await
+}
+
+fn assert_quota_exceeded(status: StatusCode, body: &Value, needle: &str) {
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "quota_exceeded", "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(needle),
+        "{message:?} should mention {needle:?}"
+    );
+}
+
+#[tokio::test]
+async fn over_quota_requests_get_429_before_any_upstream_call() {
+    let (vendor, base) = fake_vendor().await;
+    let (app, state) = gateway(config(&base)).await;
+    let hub = state.db().create_hub("demo").await.unwrap();
+    let (status, body) = patch_hub(
+        &app,
+        "demo",
+        json!({"onboarding_days": 0, "daily_request_limit": 2}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for _ in 0..2 {
+        let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+    assert_quota_exceeded(status, &body, "daily limit of 2");
+    assert_eq!(
+        vendor.calls().len(),
+        2,
+        "the refused request never reached the vendor"
+    );
+}
+
+#[tokio::test]
+async fn onboarding_days_raise_the_daily_limit_for_new_hubs() {
+    let (vendor, base) = fake_vendor().await;
+    let (app, state) = gateway(config(&base)).await;
+    let hub = state.db().create_hub("demo").await.unwrap();
+    patch_hub(
+        &app,
+        "demo",
+        json!({"onboarding_daily_requests": 3, "onboarding_days": 3, "daily_request_limit": 1}),
+    )
+    .await;
+    for _ in 0..3 {
+        let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+    assert_quota_exceeded(status, &body, "daily limit of 3");
+    assert_eq!(vendor.calls().len(), 3);
+}
+
+#[tokio::test]
+async fn monthly_request_limit_and_cost_cap_apply() {
+    let (_vendor, base) = fake_vendor().await;
+    let (app, state) = gateway(config(&base)).await;
+    let hub = state.db().create_hub("demo").await.unwrap();
+    patch_hub(
+        &app,
+        "demo",
+        json!({"onboarding_days": 0, "daily_request_limit": 10, "monthly_request_limit": 1}),
+    )
+    .await;
+    let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+    assert_quota_exceeded(status, &body, "monthly limit of 1");
+
+    // Cost cap: price the model so every default reply (1 in, 2 out tokens) costs 30 cents.
+    let costly = state.db().create_hub("costly").await.unwrap();
+    patch_hub(&app, "costly", json!({"onboarding_days": 0, "daily_request_limit": 10, "monthly_request_limit": 100, "monthly_cost_cap_cents": 100})).await;
+    sqlx::query("INSERT INTO model_prices (vendor, model, input_cents_per_mtok, output_cents_per_mtok) VALUES ('minimax', 'MiniMax-M3', 10000000, 10000000)")
+        .execute(state.db().pool())
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        let (status, _, body) = call_as(&app, &costly.token, &prompt("MiniMax-M3")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, _, body) = call_as(&app, &costly.token, &prompt("MiniMax-M3")).await;
+    assert_quota_exceeded(status, &body, "cost cap");
+}
+
+#[tokio::test]
+async fn daily_token_limit_is_a_secondary_cap() {
+    let (vendor, base) = fake_vendor().await;
+    let (app, state) = gateway(config(&base)).await;
+    let hub = state.db().create_hub("demo").await.unwrap();
+    patch_hub(
+        &app,
+        "demo",
+        json!({"onboarding_days": 0, "daily_request_limit": 10, "daily_token_limit": 25}),
+    )
+    .await;
+    vendor.reply(StatusCode::OK, reply_json(10, 20));
+    let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+    assert_quota_exceeded(status, &body, "token");
+}
+
+// ---------------------------------------------------------------- v2: BYOK
+
+fn config_with_master(minimax_base: &str) -> Config {
+    let mut cfg = config(minimax_base);
+    cfg.master_key = Some("master-secret".into());
+    cfg
+}
+
+#[tokio::test]
+async fn byok_hubs_use_their_own_key_and_skip_the_platform_quota() {
+    let (vendor, base) = fake_vendor().await;
+    let (app, state) = gateway(config_with_master(&base)).await;
+    let hub = state.db().create_hub("demo").await.unwrap();
+    patch_hub(
+        &app,
+        "demo",
+        json!({"onboarding_days": 0, "daily_request_limit": 1}),
+    )
+    .await;
+    let (status, _, body) = send(
+        &app,
+        admin_request(
+            "POST",
+            "/admin/hubs/demo/byok",
+            Some("admin-secret"),
+            Some(json!({"vendor": "minimax", "key": "hub-own-key"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    for _ in 0..3 {
+        let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let calls = vendor.calls();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls
+            .iter()
+            .all(|(h, _)| header_str(h, "x-api-key") == Some("hub-own-key"))
+    );
+
+    let (_, _, usage) = send(
+        &app,
+        admin_request("GET", "/admin/usage?hub=demo", Some("admin-secret"), None),
+    )
+    .await;
+    assert_eq!(
+        usage[0]["requests"], 3,
+        "usage is still recorded for BYOK hubs"
+    );
+
+    let (_, _, hubs) = send(
+        &app,
+        admin_request("GET", "/admin/hubs", Some("admin-secret"), None),
+    )
+    .await;
+    let demo = hubs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "demo")
+        .unwrap();
+    assert_eq!(demo["byok_vendors"], json!(["minimax"]));
+    assert!(
+        demo.to_string().find("hub-own-key").is_none(),
+        "keys never leave the gateway"
+    );
+
+    let (status, _, _) = send(
+        &app,
+        admin_request(
+            "DELETE",
+            "/admin/hubs/demo/byok/minimax",
+            Some("admin-secret"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, body) = call_as(&app, &hub.token, &prompt("MiniMax-M3")).await;
+    assert_quota_exceeded(status, &body, "daily limit of 1");
+}
+
+#[tokio::test]
+async fn byok_needs_the_master_key() {
+    let (_vendor, base) = fake_vendor().await;
+    let (app, state) = gateway(config(&base)).await;
+    state.db().create_hub("demo").await.unwrap();
+    let (status, _, body) = send(
+        &app,
+        admin_request(
+            "POST",
+            "/admin/hubs/demo/byok",
+            Some("admin-secret"),
+            Some(json!({"vendor": "minimax", "key": "k"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("GATEWAY_MASTER_KEY")
+    );
+}
+
+// ---------------------------------------------------------------- v2: cache
+
+#[tokio::test]
+async fn identical_requests_with_reordered_keys_hit_the_cache() {
+    let (vendor, base) = fake_vendor().await;
+    let (app, state) = gateway(config(&base)).await;
+    let a = state.db().create_hub("a").await.unwrap();
+    let b = state.db().create_hub("b").await.unwrap();
+
+    let ordered = r#"{"model":"MiniMax-M3","max_tokens":256,"temperature":0,"messages":[{"role":"user","content":"Label: salt, garlic"}]}"#;
+    let reordered = r#"{"messages":[{"content":"Label: salt, garlic","role":"user"}],"temperature":0.0,"max_tokens":256,"model":"MiniMax-M3"}"#;
+    let raw = |token: &str, body: &str| {
+        Request::post("/anthropic/v1/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-api-key", token)
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    let (status, headers, first) = send(&app, raw(&a.token, ordered)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(header_str(&headers, "x-gateway-cache"), Some("miss"));
+
+    let (status, headers, second) = send(&app, raw(&b.token, reordered)).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(
+        header_str(&headers, "x-gateway-cache"),
+        Some("hit"),
+        "another hub, reordered keys, 0.0 vs 0"
+    );
+    assert_eq!(second, first, "the cached reply is byte-identical");
+    assert_eq!(vendor.calls().len(), 1, "the vendor was called once");
+
+    let (_, _, usage) = send(
+        &app,
+        admin_request("GET", "/admin/usage", Some("admin-secret"), None),
+    )
+    .await;
+    assert_eq!(
+        usage.as_array().unwrap().len(),
+        1,
+        "a hit records no usage: {usage}"
+    );
+    let (status, _, stats) = send(
+        &app,
+        admin_request("GET", "/admin/cache/stats", Some("admin-secret"), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    assert_eq!(stats["entries"], 1);
+    assert_eq!(stats["hits"], 1);
+}
+
+#[tokio::test]
+async fn only_deterministic_successful_replies_are_cached() {
+    let (vendor, base) = fake_vendor().await;
+    let (app, state) = gateway(config(&base)).await;
+    let hub = state.db().create_hub("demo").await.unwrap();
+
+    let mut creative = deterministic("MiniMax-M3");
+    creative["temperature"] = json!(0.7);
+    for _ in 0..2 {
+        let (status, headers, _) = call_as(&app, &hub.token, &creative).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header_str(&headers, "x-gateway-cache"), Some("bypass"));
+    }
+    assert_eq!(vendor.calls().len(), 2, "temperature 0.7 is never cached");
+
+    vendor
+        .reply(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"type": "error", "error": {"type": "api_error", "message": "boom"}}),
+        )
+        .reply(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"type": "error", "error": {"type": "api_error", "message": "boom"}}),
+        );
+    let (status, _, _) = call_as(&app, &hub.token, &deterministic("MiniMax-M3")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, headers, _) = call_as(&app, &hub.token, &deterministic("MiniMax-M3")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header_str(&headers, "x-gateway-cache"),
+        Some("miss"),
+        "errors are never cached"
+    );
+}
+
+#[tokio::test]
+async fn cache_entries_expire_and_the_table_is_bounded() {
+    let (vendor, base) = fake_vendor().await;
+    let mut cfg = config(&base);
+    cfg.cache_ttl = Duration::ZERO;
+    let (app, state) = gateway(cfg).await;
+    let hub = state.db().create_hub("demo").await.unwrap();
+    for _ in 0..2 {
+        let (_, headers, _) = call_as(&app, &hub.token, &deterministic("MiniMax-M3")).await;
+        assert_eq!(
+            header_str(&headers, "x-gateway-cache"),
+            Some("miss"),
+            "a zero TTL expires every entry"
+        );
+    }
+    assert_eq!(vendor.calls().len(), 2);
+
+    let (vendor, base) = fake_vendor().await;
+    let mut cfg = config(&base);
+    cfg.cache_max_entries = 2;
+    let (app, state) = gateway(cfg).await;
+    let hub = state.db().create_hub("demo").await.unwrap();
+    for i in 0..3 {
+        let mut body = deterministic("MiniMax-M3");
+        body["messages"][0]["content"] = json!(format!("Label batch {i}"));
+        call_as(&app, &hub.token, &body).await;
+    }
+    assert_eq!(vendor.calls().len(), 3);
+    let (_, _, stats) = send(
+        &app,
+        admin_request("GET", "/admin/cache/stats", Some("admin-secret"), None),
+    )
+    .await;
+    assert_eq!(stats["entries"], 2, "oldest entry evicted: {stats}");
+}
+
+// ---------------------------------------------------------------- v2: admin
+
+#[tokio::test]
+async fn admin_can_update_disable_and_delete_hubs() {
+    let (vendor, base) = fake_vendor().await;
+    let (app, _) = gateway(config(&base)).await;
+    let (status, _, created) = send(
+        &app,
+        admin_request(
+            "POST",
+            "/admin/hubs",
+            Some("admin-secret"),
+            Some(json!({"name": "jacob", "quota": {"daily_request_limit": 42}})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["quota"]["daily_request_limit"], 42);
+    assert_eq!(
+        created["quota"]["monthly_request_limit"], 150,
+        "other fields keep the free-tier defaults"
+    );
+    let token = created["token"].as_str().unwrap().to_string();
+
+    let (status, body) = patch_hub(&app, "jacob", json!({"monthly_request_limit": 7})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["quota"]["monthly_request_limit"], 7);
+    assert_eq!(
+        body["quota"]["daily_request_limit"], 42,
+        "a patch leaves the other fields alone"
+    );
+
+    let (status, body) = patch_hub(&app, "jacob", json!({"status": "disabled"})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "disabled");
+    let (status, _, _) = call_as(&app, &token, &prompt("MiniMax-M3")).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a disabled hub's token is refused"
+    );
+    assert!(vendor.calls().is_empty());
+
+    let (status, body) = patch_hub(&app, "jacob", json!({"status": "sleeping"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _) = patch_hub(&app, "nobody", json!({"status": "active"})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = send(
+        &app,
+        admin_request("DELETE", "/admin/hubs/jacob", Some("admin-secret"), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = send(
+        &app,
+        admin_request("DELETE", "/admin/hubs/jacob", Some("admin-secret"), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, _, hubs) = send(
+        &app,
+        admin_request("GET", "/admin/hubs", Some("admin-secret"), None),
+    )
+    .await;
+    assert_eq!(hubs, json!([]));
 }

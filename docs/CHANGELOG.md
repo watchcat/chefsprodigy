@@ -36,6 +36,9 @@ The import dialog now includes a responsive From photo tab with a camera-capable
 ### RN-49 · Navbar logo and PWA icons (S)
 PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and service-worker shell updated.
 
+### RN-48 · MiniMax-M3 default and lenient model-reply parsing (M)
+`LLM_MODEL=minimax/MiniMax-M3` via `.env`; rig reads vendor variables unless `LLM_API_KEY` overrides. Replies with missing/renamed fields, string ranges, time phrases, decimal commas and unit spellings now parse; gateway errors and rejected replies are logged.
+
 ## Archived 2026-10-23
 
 ### RN-20 · Frontend PWA with Cook Mode (L)

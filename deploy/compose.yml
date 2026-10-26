@@ -43,6 +43,7 @@ services:
     command: ["serve"]
     environment:
       GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-}
+      GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY:-}
       MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MINIMAX_ANTHROPIC_API_BASE: ${MINIMAX_ANTHROPIC_API_BASE:-https://api.minimax.io/anthropic}

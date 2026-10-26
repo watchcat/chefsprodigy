@@ -40,6 +40,14 @@ pub struct Config {
     pub retry_backoff: Duration,
     /// In-flight upstream calls allowed per hub
     pub per_hub_concurrency: usize,
+    /// Encrypts hubs' own vendor keys (BYOK); `None` disables BYOK
+    pub master_key: Option<String>,
+    /// Lifetime of a cached reply
+    pub cache_ttl: Duration,
+    /// Entries kept before the least recently hit ones are evicted
+    pub cache_max_entries: usize,
+    /// Largest reply body the cache stores
+    pub cache_max_body_bytes: usize,
 }
 
 impl Default for Config {
@@ -51,6 +59,10 @@ impl Default for Config {
             upstream_timeout: Duration::from_secs(120),
             retry_backoff: Duration::from_secs(1),
             per_hub_concurrency: 2,
+            master_key: None,
+            cache_ttl: Duration::from_secs(30 * 24 * 3600),
+            cache_max_entries: 10_000,
+            cache_max_body_bytes: 1024 * 1024,
         }
     }
 }
@@ -58,7 +70,9 @@ impl Default for Config {
 impl Config {
     /// Read `MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`, the optional base-URL
     /// overrides (`MINIMAX_ANTHROPIC_API_BASE`, `ANTHROPIC_API_BASE`),
-    /// `GATEWAY_ADMIN_TOKEN`, `GATEWAY_LOG_CONTENT` and `GATEWAY_UPSTREAM_TIMEOUT_SECS`.
+    /// `GATEWAY_ADMIN_TOKEN`, `GATEWAY_MASTER_KEY`, `GATEWAY_LOG_CONTENT`,
+    /// `GATEWAY_UPSTREAM_TIMEOUT_SECS`, `GATEWAY_CACHE_TTL_DAYS` and
+    /// `GATEWAY_CACHE_MAX_ENTRIES`.
     pub fn from_env() -> Self {
         let env = |key: &str| {
             std::env::var(key)
@@ -83,12 +97,21 @@ impl Config {
         let timeout = env("GATEWAY_UPSTREAM_TIMEOUT_SECS")
             .and_then(|s| s.parse().ok())
             .map(Duration::from_secs);
+        let defaults = Self::default();
         Self {
             vendors,
             admin_token: env("GATEWAY_ADMIN_TOKEN"),
+            master_key: env("GATEWAY_MASTER_KEY"),
             log_content: matches!(env("GATEWAY_LOG_CONTENT").as_deref(), Some("1" | "true")),
             upstream_timeout: timeout.unwrap_or(Duration::from_secs(120)),
-            ..Self::default()
+            cache_ttl: env("GATEWAY_CACHE_TTL_DAYS")
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|days| Duration::from_secs(days * 24 * 3600))
+                .unwrap_or(defaults.cache_ttl),
+            cache_max_entries: env("GATEWAY_CACHE_MAX_ENTRIES")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(defaults.cache_max_entries),
+            ..defaults
         }
     }
 

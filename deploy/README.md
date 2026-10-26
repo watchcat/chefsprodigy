@@ -226,6 +226,38 @@ Without an admin token the gateway still runs (passthrough only) and `docker exe
 llm-gateway /usr/local/bin/llm-gateway add-hub <name>` issues tokens on the command line.
 `gateway/data/gateway.db` is included in `hubctl backup all`.
 
+**Quotas.** Every hub starts on the free tier (spec section 11): 30 model requests per UTC
+day during its first 3 days, then 10 per day, and at most 150 requests or 100 cents of
+estimated cost per calendar month. Over quota the gateway answers `429 quota_exceeded`
+before calling the vendor, and the hub shows "model quota exceeded" (RN-67). Raise a hub's
+limits or pause it:
+
+```sh
+curl -s -X PATCH http://127.0.0.1:8090/admin/hubs/jacob -H "authorization: Bearer $GATEWAY_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"daily_request_limit": 50, "monthly_request_limit": 1000}'
+curl -s -X PATCH http://127.0.0.1:8090/admin/hubs/jacob -H "authorization: Bearer $GATEWAY_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"status": "disabled"}'      # or "active"
+curl -s -X DELETE http://127.0.0.1:8090/admin/hubs/jacob -H "authorization: Bearer $GATEWAY_ADMIN_TOKEN"
+```
+
+Cost estimates need prices: insert rows into `model_prices` (cents per million tokens),
+for example `INSERT INTO model_prices VALUES ('minimax', 'MiniMax-M3', 30, 120);` with
+`sqlite3 gateway/data/gateway.db`; without prices the cost cap never triggers.
+
+**Bring your own key.** With `GATEWAY_MASTER_KEY` set, a hub owner's own vendor key can be
+stored encrypted; that hub then bypasses the platform quota (usage is still recorded):
+
+```sh
+curl -s -X POST http://127.0.0.1:8090/admin/hubs/jacob/byok -H "authorization: Bearer $GATEWAY_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"vendor": "minimax", "key": "<the owner's key>"}'
+curl -s -X DELETE http://127.0.0.1:8090/admin/hubs/jacob/byok/minimax -H "authorization: Bearer $GATEWAY_ADMIN_TOKEN"
+```
+
+**Cache.** Deterministic requests (`temperature` 0, no streaming) are cached for 30 days by
+a hash of their canonical JSON, so two hubs normalizing the same ingredients share one
+vendor call. `GET /admin/cache/stats` reports entries, bytes and hits;
+`GATEWAY_CACHE_MAX_ENTRIES` (default 10000) bounds the table.
+
 ## 11. Troubleshooting
 
 - `hubctl status` shows `unhealthy`: `docker logs hub-<name>`; the health check is the

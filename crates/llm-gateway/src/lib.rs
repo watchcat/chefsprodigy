@@ -4,16 +4,19 @@
 //! A hub keeps its normal Messages-format client and points
 //! `MINIMAX_ANTHROPIC_API_BASE` at `http://llm-gateway:8080/anthropic` with its
 //! hub token as the key; the gateway swaps the token for the real vendor key,
-//! forwards the request unchanged and records usage per hub and day. v1 has no
-//! cache or quotas (RN-68).
+//! forwards the request unchanged and records usage per hub and day. v2 adds the
+//! free-tier quotas, the canonical-JSON reply cache and BYOK keys.
 
 pub mod admin;
 pub mod auth;
+pub mod byok;
+pub mod cache;
 pub mod config;
 pub mod db;
 pub mod error;
 pub mod health;
 pub mod proxy;
+pub mod quota;
 pub mod state;
 
 use axum::routing::get;
@@ -22,7 +25,7 @@ use serde_json::json;
 use tower_http::trace::TraceLayer;
 
 pub use config::{Config, Vendor};
-pub use db::{Db, Hub, NewHub, UsageRow};
+pub use db::{CacheStats, Db, Hub, NewHub, Quota, QuotaPatch, UsageRow};
 pub use error::GatewayError;
 pub use state::AppState;
 

@@ -16,10 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-68 · llm-gateway v2: quotas, cache, admin API (M)
-Daily/monthly quotas, deterministic-reply cache, admin endpoints and BYOK per spec §5.2.
-- Acceptance: over-quota request gets 429 before any upstream call; a repeated label request is a cache hit; admin API tested.
-
 ### RN-75 · Seeded `canonical_terms` dictionary (S)
 SQLite migration inserting `en`, `ru`, `nl` labels for the ~200 most common everyday ingredients (`salt`, `garlic`, `onion`, `butter`, `egg`, `olive_oil`, …) with `origin = 'human'` via `INSERT OR IGNORE`, so hubs never spend model tokens on basic terms and the gateway cache is not relied on for them (spec §4.3).
 - Acceptance: a fresh node labels `salt`/`garlic`/`onion` in all three languages with no model call (fake extractor records zero `translate_terms` calls); rows that already exist are untouched.
@@ -84,6 +80,12 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-68 · llm-gateway v2: quotas, cache, admin API (M)
+Daily/monthly quotas, deterministic-reply cache, admin endpoints and BYOK per spec §5.2.
+- Acceptance: over-quota request gets 429 before any upstream call; a repeated label request is a cache hit; admin API tested.
+
+- Done 2026-10-27: quotas per spec §11 as per-hub columns (`Quota`, free tier by default): `onboarding_daily_requests` for `onboarding_days` after `created_at`, then `daily_request_limit`, plus `monthly_request_limit`, `monthly_cost_cap_cents` (needs `model_prices` rows) and an optional `daily_token_limit`; checked from `usage_daily` sums before any upstream call → 429 `{"type":"error","error":{"type":"quota_exceeded","message":…}}` (RN-67 names it on the hub). Cache: key = SHA-256 of vendor + model + canonical JSON (sorted keys, integral floats as integers, no whitespace), only `temperature` 0 and no streaming, 2xx only, TTL 30 days (`GATEWAY_CACHE_TTL_DAYS`), 1 MB bodies, LRU by `last_hit` above `GATEWAY_CACHE_MAX_ENTRIES` (10000); hits add no usage and return `x-gateway-cache: hit` (`miss`/`bypass` otherwise). BYOK: `POST /admin/hubs/{name}/byok {vendor,key}` / `DELETE …/byok/{vendor}`, JSON map encrypted with XChaCha20-Poly1305 under SHA-256(`GATEWAY_MASTER_KEY`); a BYOK hub's own key replaces the platform key and skips the quota, usage still recorded; admin listing shows `byok_vendors` only. Admin: `POST /admin/hubs {name, quota?}`, `PATCH /admin/hubs/{name}` (quota fields, `status` active|disabled; a disabled hub's token is refused), `DELETE /admin/hubs/{name}`, `GET /admin/cache/stats`. Deploy: `GATEWAY_MASTER_KEY` in compose/env.example, how-to §10 covers quotas, prices, BYOK and cache. 10 new tests (21 gateway tests, 237 workspace): over-quota 429 with 2 vendor calls, onboarding tier, monthly request and cost caps, token cap, BYOK bypass + key never listed, BYOK 503 without master key, reordered-keys cache hit across two hubs with no extra usage, no caching of 0.7 or errors, zero-TTL expiry + bounded table, PATCH/disable/DELETE flow. Two bugs caught by the tests on the way: a `%Y-%m-%` chrono pattern (invalid) and same-second expiry at zero TTL.
 
 ### RN-67 · Hub: model quota-exceeded mapping (S)
 Gateway 429/402 surfaces as a readable `model_quota_exceeded` error (HTTP 429) instead of a generic model failure.
@@ -163,6 +165,3 @@ Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pa
 
 ### RN-47 · Dev tooling: devbuild.sh, .env, per-toolchain target dirs (S)
 `scripts/devbuild.sh` builds, runs, seeds and opens the browser; loads `.env` (template `.env.example`, git-ignored); uses `target/rustc-<version>/` per toolchain and refuses a stale `DEVELOPER_DIR`.
-
-### RN-48 · MiniMax-M3 default and lenient model-reply parsing (M)
-`LLM_MODEL=minimax/MiniMax-M3` via `.env`; rig reads vendor variables unless `LLM_API_KEY` overrides. Replies with missing/renamed fields, string ranges, time phrases, decimal commas and unit spellings now parse; gateway errors and rejected replies are logged.
