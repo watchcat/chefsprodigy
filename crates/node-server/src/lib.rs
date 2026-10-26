@@ -6,6 +6,7 @@
 pub mod api;
 pub mod auth;
 pub mod error;
+pub mod health;
 pub mod state;
 pub mod images;
 pub mod mcp;

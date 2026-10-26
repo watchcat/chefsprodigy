@@ -18,7 +18,7 @@ recipe-core = { workspace = true }
 recipe-db = { workspace = true }
 recipe-scraper = { workspace = true }
 recipe-mcp = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net", "time"] }
 axum = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }

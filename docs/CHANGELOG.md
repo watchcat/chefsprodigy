@@ -2,6 +2,26 @@
 
 Stories moved out of the Kanban `Done` column, newest first. Ids are never reused.
 
+## Archived 2026-10-26
+
+### RN-45 · MCP: photo_paths on import_recipe (S)
+`import_recipe` accepts `photo_paths`; unreadable paths are reported in the tool error. End-to-end test over stdio with a fake vision extractor.
+
+### RN-44 · Backend: photo import endpoint and vision extraction (M)
+`POST /api/v1/import/photo` live: EXIF-oriented 1600 px JPEG normalization, one vision call (`PhotoExtraction`), lenient parsing, cover from the first dish photo, and 422/503 paths. The first MiniMax-M3 browser run is verified under RN-46.
+
+### RN-41 · UI: cover image upload in the editor (S)
+The editor accepts JPEG, PNG, and WebP images, then posts the selected file as multipart field `file` to `PUT /api/v1/recipes/{id}/image` after a recipe exists. It waits for the returned recipe and routes to its detail page, where the converted cover is rendered.
+- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a JPEG uploaded through the Beef Pho editor and the returned WebP cover rendered on both the recipe detail page and library card.
+
+### RN-35 · UI: manual recipe editor (M)
+The PWA now has `#/new` and `#/recipe/{id}/edit` views with accessible create/edit forms for title, description, servings, times, tags, provenance, visibility, normalized ingredients, specialty flags, and ordered timed steps. Ingredient and step rows are dynamically addable/removable; successful saves use the documented `POST` or `PUT` endpoint and API failures render inline.
+- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: Browser Lemon Orzo was created from the form and opened in detail; the seeded Beef Pho recipe round-tripped all 5 ingredients, 5 specialty controls, 3 ordered instructions, and 3 timer controls through `PUT`; dynamic controls added a sixth ingredient and fourth step without persisting on Cancel. Browser console had no errors.
+
+### RN-43 · Drop the unused legacy vector mark (S)
+Removed the unreferenced 150 KB legacy vector app mark from the embedded bundle. The local PNG icon set remains the sole browser and manifest branding source, and the frontend scope now documents that arrangement.
+- Verified 2026-10-22: the static bundle is 176 KB and a repository-source scan finds no retired asset filename.
+
 ## Archived 2026-10-23
 
 ### RN-20 · Frontend PWA with Cook Mode (L)

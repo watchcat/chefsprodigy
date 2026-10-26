@@ -1,0 +1,88 @@
+name: Container image
+
+# Every push to main and every pull request builds the image and smoke-tests it through
+# its own HEALTHCHECK. Tags v* additionally publish it to GHCR as
+# ghcr.io/watchcat/chefsprodigy:<version>, :<major.minor> and :latest.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  image:
+    name: Build, smoke-test, publish on tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+
+      - name: Build and load for the smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke --health-interval=5s -p 8080:8080 "$IMAGE:smoke"
+          status=starting
+          for _ in $(seq 1 24); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' smoke)
+            [ "$status" = healthy ] && break
+            sleep 5
+          done
+          echo "health status: $status"
+          docker logs smoke
+          [ "$status" = healthy ]
+          curl -fsS http://127.0.0.1:8080/api/v1/health; echo
+          if docker exec smoke /bin/sh -c true 2>/dev/null; then
+            echo "the image must not contain a shell"; exit 1
+          fi
+          docker rm -f smoke
+          size=$(docker image inspect --format '{{.Size}}' "$IMAGE:smoke")
+          echo "uncompressed image size: $((size / 1024 / 1024)) MB"
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
