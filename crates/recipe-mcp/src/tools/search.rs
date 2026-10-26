@@ -76,6 +76,7 @@ pub async fn search(db: &Db, p: SearchRecipesParams) -> Result<SearchRecipesOutp
         limit: Some(p.limit.unwrap_or(DEFAULT_LIMIT)),
         offset: None,
         lang: p.language,
+        public_only: false,
     };
     let recipes = db
         .search_recipes(&query)

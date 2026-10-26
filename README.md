@@ -53,7 +53,7 @@ Data (SQLite database and WebP covers) lives in `./data` by default (`--data-dir
 |---|---|
 | `LLM_MODEL` | rig catalog reference, e.g. `minimax/MiniMax-M3`, `anthropic/claude-haiku-4-5`, `ollama/llama3.2` |
 | `MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`, ... | the vendor's key; `LLM_API_KEY` is a generic override |
-| `NODE_API_KEY` | enables the bearer-protected `/mcp` endpoint |
+| `NODE_API_KEY` | the owner's secret: protects writes, imports and live translations on the REST API (login at `/api/v1/auth/login` or send it as a bearer token) and enables `/mcp`. Unset = single-user mode, everyone is the owner |
 | `NODE_PORT`, `NODE_HOST`, `NODE_DATA_DIR`, `NODE_CHEF_NAME`, `NODE_AUTHOR_DID` | server settings |
 
 ## Using it

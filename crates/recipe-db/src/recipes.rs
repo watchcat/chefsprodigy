@@ -222,6 +222,9 @@ fn push_from_and_filters(qb: &mut QueryBuilder<Sqlite>, query: &SearchQuery, fts
         qb.push(" LEFT JOIN recipe_translations tr ON tr.recipe_id = r.id AND tr.lang = ").push_bind(lang);
     }
     qb.push(" WHERE 1 = 1");
+    if query.public_only {
+        qb.push(" AND r.is_public = 1");
+    }
     if let Some(tag) = &query.tag {
         qb.push(" AND EXISTS (SELECT 1 FROM json_each(r.tags) WHERE json_each.value = ")
             .push_bind(tag.clone())

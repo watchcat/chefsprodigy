@@ -101,13 +101,19 @@ impl TranslationService {
     /// Localized labels for canonical ids: cached in `canonical_terms`, missing
     /// ones fetched from the model in batches of 100, else the humanized id.
     pub async fn labels(&self, canonical_ids: &[String], lang: &str) -> Result<HashMap<String, String>, ImportError> {
+        self.labels_with(canonical_ids, lang, true).await
+    }
+
+    /// Like [`Self::labels`]; with `allow_live = false` only cached labels are
+    /// used and nothing is asked of the model (anonymous readers).
+    pub async fn labels_with(&self, canonical_ids: &[String], lang: &str, allow_live: bool) -> Result<HashMap<String, String>, ImportError> {
         let lang = normalize_lang(lang).ok_or_else(|| ImportError::InvalidInput(format!("invalid language code: {lang}")))?;
         let mut ids: Vec<String> = canonical_ids.iter().map(|i| i.trim().to_lowercase()).filter(|i| !i.is_empty()).collect();
         ids.sort();
         ids.dedup();
         let mut found = self.db.get_terms(&ids, &lang).await?;
         let missing: Vec<String> = ids.iter().filter(|i| !found.contains_key(*i)).cloned().collect();
-        if !missing.is_empty() && self.can_translate() {
+        if !missing.is_empty() && allow_live && self.can_translate() {
             for chunk in missing.chunks(100) {
                 match self.importer.translate_terms(chunk, &lang).await {
                     Ok(labels) => {
@@ -127,10 +133,17 @@ impl TranslationService {
 
     /// Fill `canonical_label` on every ingredient for `lang`.
     pub async fn label_ingredients(&self, recipe: &mut Recipe, lang: &str) -> Result<(), ImportError> {
+        self.label_ingredients_with(recipe, lang, true).await
+    }
+
+    async fn label_ingredients_with(&self, recipe: &mut Recipe, lang: &str, allow_live: bool) -> Result<(), ImportError> {
         let ids: Vec<String> = recipe.ingredients.iter().map(|i| i.canonical_id.clone()).collect();
-        let labels = self.labels(&ids, lang).await?;
+        let labels = self.labels_with(&ids, lang, allow_live).await?;
         for item in &mut recipe.ingredients {
-            item.canonical_label = labels.get(&item.canonical_id.trim().to_lowercase()).cloned();
+            let key = item.canonical_id.trim().to_lowercase();
+            // Without live lookups, only real cached labels count; the humanized
+            // fallback would otherwise masquerade as a translation.
+            item.canonical_label = labels.get(&key).filter(|l| allow_live || **l != Self::humanize(&key)).cloned();
         }
         Ok(())
     }
@@ -139,23 +152,29 @@ impl TranslationService {
     /// unavailable model all yield the source wording with no translation info.
     /// Whenever a language is given, ingredients carry localized labels.
     pub async fn localize(&self, recipe: Recipe, lang: Option<&str>) -> Result<LocalizedRecipe, ImportError> {
+        self.localize_with(recipe, lang, true).await
+    }
+
+    /// Like [`Self::localize`]. With `allow_live = false` only cached
+    /// translations and labels are served; the model is never called.
+    pub async fn localize_with(&self, recipe: Recipe, lang: Option<&str>, allow_live: bool) -> Result<LocalizedRecipe, ImportError> {
         let Some(lang) = lang.and_then(normalize_lang) else { return Ok(LocalizedRecipe::source(recipe)) };
-        let mut localized = self.localize_wording(recipe, &lang).await?;
-        self.label_ingredients(&mut localized.recipe, &lang).await?;
+        let mut localized = self.localize_wording(recipe, &lang, allow_live).await?;
+        self.label_ingredients_with(&mut localized.recipe, &lang, allow_live).await?;
         Ok(localized)
     }
 
-    async fn localize_wording(&self, recipe: Recipe, lang: &str) -> Result<LocalizedRecipe, ImportError> {
+    async fn localize_wording(&self, recipe: Recipe, lang: &str, allow_live: bool) -> Result<LocalizedRecipe, ImportError> {
         let lang = lang.to_string();
         if recipe.language.as_deref() == Some(lang.as_str()) {
             return Ok(LocalizedRecipe::source(recipe));
         }
         if let Some(t) = self.db.get_translation(&recipe.id, &lang).await? {
-            if !t.is_stale_for(&recipe) || t.origin == TranslationOrigin::Human {
+            if !t.is_stale_for(&recipe) || t.origin == TranslationOrigin::Human || !allow_live {
                 return Ok(recipe.localized(&t));
             }
         }
-        if !self.can_translate() {
+        if !allow_live || !self.can_translate() {
             return Ok(LocalizedRecipe::source(recipe));
         }
 

@@ -22,6 +22,7 @@ pub fn router() -> Router<AppState> {
         .merge(import::router())
         .merge(shopping::router())
         .merge(i18n::router())
+        .merge(crate::auth::router())
         .fallback(not_found)
 }
 

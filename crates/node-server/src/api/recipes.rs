@@ -10,6 +10,7 @@ use recipe_db::recipes::{DEFAULT_LIMIT, MAX_LIMIT};
 use serde::{Deserialize, Serialize};
 
 use crate::api::extract::{Json as JsonBody, Query};
+use crate::auth::{OptionalOwner, RequireOwner};
 use crate::{ApiError, AppState};
 
 /// Upper bound for cover image uploads.
@@ -71,7 +72,12 @@ pub fn display_language(param: Option<&str>, headers: &HeaderMap) -> Result<Opti
         .find_map(normalize_lang))
 }
 
-async fn list(State(state): State<AppState>, Query(params): Query<ListParams>, headers: HeaderMap) -> Result<Json<ListResponse>, ApiError> {
+async fn list(
+    State(state): State<AppState>,
+    OptionalOwner(owner): OptionalOwner,
+    Query(params): Query<ListParams>,
+    headers: HeaderMap,
+) -> Result<Json<ListResponse>, ApiError> {
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let offset = params.offset.unwrap_or(0);
     let lang = display_language(params.lang.as_deref(), &headers)?;
@@ -82,26 +88,34 @@ async fn list(State(state): State<AppState>, Query(params): Query<ListParams>, h
         limit: Some(limit),
         offset: Some(offset),
         lang,
+        public_only: !owner,
         ..Default::default()
     };
     let (items, total) = tokio::try_join!(state.db().search_recipes(&query), state.db().count_recipes(&query))?;
     Ok(Json(ListResponse { items, limit, offset, total }))
 }
 
-async fn create(State(state): State<AppState>, JsonBody(input): JsonBody<RecipeInput>) -> Result<Response, ApiError> {
+async fn create(State(state): State<AppState>, _owner: RequireOwner, JsonBody(input): JsonBody<RecipeInput>) -> Result<Response, ApiError> {
     let recipe = state.db().create_recipe(input).await?;
     Ok((StatusCode::CREATED, Json(recipe)).into_response())
 }
 
 async fn get_one(
     State(state): State<AppState>,
+    OptionalOwner(owner): OptionalOwner,
     Path(id): Path<String>,
     Query(params): Query<GetParams>,
     headers: HeaderMap,
 ) -> Result<Json<LocalizedRecipe>, ApiError> {
-    let recipe = state.db().get_recipe(&id).await?.ok_or_else(|| ApiError::not_found("recipe not found"))?;
+    let recipe = state
+        .db()
+        .get_recipe(&id)
+        .await?
+        .filter(|r| owner || r.is_public)
+        .ok_or_else(|| ApiError::not_found("recipe not found"))?;
     let lang = display_language(params.lang.as_deref(), &headers)?;
-    let mut localized = state.translations().localize(recipe, lang.as_deref()).await?;
+    // Anonymous readers get cached translations only; live model calls are for the owner.
+    let mut localized = state.translations().localize_with(recipe, lang.as_deref(), owner).await?;
     if let Some(target) = params.servings {
         localized.recipe = localized.recipe.scaled_to(target);
     }
@@ -111,6 +125,7 @@ async fn get_one(
 /// `PUT /recipes/{id}/translations/{lang}`: store a human translation.
 async fn put_translation(
     State(state): State<AppState>,
+    _owner: RequireOwner,
     Path((id, lang)): Path<(String, String)>,
     JsonBody(input): JsonBody<TranslationInput>,
 ) -> Result<Json<LocalizedRecipe>, ApiError> {
@@ -123,7 +138,11 @@ async fn put_translation(
 }
 
 /// `DELETE /recipes/{id}/translations/{lang}`: drop a translation so it regenerates.
-async fn delete_translation(State(state): State<AppState>, Path((id, lang)): Path<(String, String)>) -> Result<StatusCode, ApiError> {
+async fn delete_translation(
+    State(state): State<AppState>,
+    _owner: RequireOwner,
+    Path((id, lang)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
     if state.translations().delete_translation(&id, &lang).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -133,6 +152,7 @@ async fn delete_translation(State(state): State<AppState>, Path((id, lang)): Pat
 
 async fn update(
     State(state): State<AppState>,
+    _owner: RequireOwner,
     Path(id): Path<String>,
     JsonBody(input): JsonBody<RecipeInput>,
 ) -> Result<Json<Recipe>, ApiError> {
@@ -140,7 +160,7 @@ async fn update(
     Ok(Json(recipe))
 }
 
-async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn delete(State(state): State<AppState>, _owner: RequireOwner, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     if state.db().delete_recipe(&id).await? {
         if let Err(e) = state.images().delete_cover(&id) {
             tracing::warn!(error = %e, %id, "recipe deleted but its cover file could not be removed");
@@ -154,6 +174,7 @@ async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Result
 /// `PUT /recipes/{id}/image`: multipart upload (field `file`) replacing the cover.
 async fn upload_image(
     State(state): State<AppState>,
+    _owner: RequireOwner,
     Path(id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<Json<Recipe>, ApiError> {

@@ -9,6 +9,7 @@ use recipe_mcp::MealieImportReport;
 use serde::Deserialize;
 
 use crate::api::extract::Json as JsonBody;
+use crate::auth::RequireOwner;
 use crate::{ApiError, AppState};
 
 /// Upper bound for Mealie backup uploads.
@@ -40,17 +41,17 @@ pub struct TextImportRequest {
     pub is_public: bool,
 }
 
-async fn import_url(State(state): State<AppState>, JsonBody(req): JsonBody<UrlImportRequest>) -> Result<Response, ApiError> {
+async fn import_url(State(state): State<AppState>, _owner: RequireOwner, JsonBody(req): JsonBody<UrlImportRequest>) -> Result<Response, ApiError> {
     let recipe = state.imports().import_url(&req.url, req.is_public).await?;
     Ok((StatusCode::CREATED, Json(recipe)).into_response())
 }
 
-async fn import_text(State(state): State<AppState>, JsonBody(req): JsonBody<TextImportRequest>) -> Result<Response, ApiError> {
+async fn import_text(State(state): State<AppState>, _owner: RequireOwner, JsonBody(req): JsonBody<TextImportRequest>) -> Result<Response, ApiError> {
     let recipe = state.imports().import_text(&req.text, req.origin_url.as_deref(), req.is_public).await?;
     Ok((StatusCode::CREATED, Json(recipe)).into_response())
 }
 
-async fn import_mealie(State(state): State<AppState>, mut multipart: Multipart) -> Result<Json<MealieImportReport>, ApiError> {
+async fn import_mealie(State(state): State<AppState>, _owner: RequireOwner, mut multipart: Multipart) -> Result<Json<MealieImportReport>, ApiError> {
     let mut archive: Option<Vec<u8>> = None;
     while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::BadRequest(e.body_text()))? {
         if field.file_name().is_some() || field.name() == Some("file") {
@@ -65,7 +66,7 @@ async fn import_mealie(State(state): State<AppState>, mut multipart: Multipart) 
 
 /// `POST /import/photo`: multipart with one or more `photos` files and an optional
 /// `is_public` text field. Reads the recipe with the vision model.
-async fn import_photo(State(state): State<AppState>, mut multipart: Multipart) -> Result<Response, ApiError> {
+async fn import_photo(State(state): State<AppState>, _owner: RequireOwner, mut multipart: Multipart) -> Result<Response, ApiError> {
     let mut photos: Vec<Vec<u8>> = Vec::new();
     let mut is_public = false;
     while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::BadRequest(e.body_text()))? {

@@ -359,6 +359,9 @@ pub struct SearchQuery {
     /// Display language: summaries use an existing translation into it when available
     #[serde(default)]
     pub lang: Option<String>,
+    /// Restrict to recipes with `is_public = true` (anonymous readers)
+    #[serde(default)]
+    pub public_only: bool,
 }
 
 /// Entry in the federation manifest used by the Central Aggregator for delta sync.

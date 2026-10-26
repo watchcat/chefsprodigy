@@ -31,6 +31,7 @@ rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 url = { workspace = true }
 rmcp = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }

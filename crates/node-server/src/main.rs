@@ -133,7 +133,9 @@ async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
             state = state.with_mcp_api_key(key.trim());
             tracing::info!("MCP endpoint enabled at /mcp (bearer protected)");
         }
-        None => tracing::warn!("{API_KEY_ENV} not set; /mcp endpoint disabled"),
+        None => tracing::warn!(
+            "{API_KEY_ENV} not set: running in single-user mode, every caller on the network is the owner (full read/write API access) and /mcp is disabled"
+        ),
     }
     let hosts = mcp_allowed_hosts
         .map(|h| h.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>())

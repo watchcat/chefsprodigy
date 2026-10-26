@@ -4,6 +4,7 @@
 //! router here lets integration tests drive it in-process.
 
 pub mod api;
+pub mod auth;
 pub mod error;
 pub mod state;
 pub mod images;

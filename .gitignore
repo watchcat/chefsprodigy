@@ -14,3 +14,4 @@ tasks/
 inputs/
 .claude/*
 !.claude/launch.json
+cookies.txt

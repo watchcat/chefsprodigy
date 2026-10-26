@@ -113,6 +113,18 @@ pub async fn label_lines(list: &mut ShoppingList, translations: &TranslationServ
 }
 
 pub async fn build(db: &Db, translations: &TranslationService, p: BuildShoppingListParams) -> Result<ShoppingList, McpToolError> {
+    build_with_visibility(db, translations, p, false, true).await
+}
+
+/// `build` for a caller who may only see public recipes (`public_only`) and
+/// may or may not trigger model calls for labels (`allow_live`).
+pub async fn build_with_visibility(
+    db: &Db,
+    translations: &TranslationService,
+    p: BuildShoppingListParams,
+    public_only: bool,
+    allow_live: bool,
+) -> Result<ShoppingList, McpToolError> {
     if p.items.is_empty() {
         return Err(McpToolError::InvalidInput("items must contain at least one recipe".to_string()));
     }
@@ -120,15 +132,19 @@ pub async fn build(db: &Db, translations: &TranslationService, p: BuildShoppingL
     let mut missing = Vec::new();
     for item in &p.items {
         match db.get_recipe(&item.recipe_id).await? {
-            Some(r) => loaded.push((r, item.servings)),
-            None => missing.push(item.recipe_id.clone()),
+            Some(r) if !public_only || r.is_public => loaded.push((r, item.servings)),
+            _ => missing.push(item.recipe_id.clone()),
         }
     }
     let pairs: Vec<(&Recipe, u8)> = loaded.iter().map(|(r, s)| (r, *s)).collect();
     let mut list = aggregate_shopping_list(&pairs, &p.pantry_exclude_canonical_ids);
     list.missing_recipes = missing;
     if let Some(lang) = p.language.as_deref() {
-        label_lines(&mut list, translations, lang).await?;
+        let ids: Vec<String> = list.basic_groceries.iter().chain(list.specialty_items.iter()).map(|l| l.canonical_id.clone()).collect();
+        let labels = translations.labels_with(&ids, lang, allow_live).await?;
+        for line in list.basic_groceries.iter_mut().chain(list.specialty_items.iter_mut()) {
+            line.canonical_label = labels.get(&line.canonical_id).cloned();
+        }
     }
     Ok(list)
 }

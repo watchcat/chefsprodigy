@@ -12,6 +12,7 @@ use rmcp::transport::streamable_http_server::StreamableHttpServerConfig;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::StreamableHttpService;
 
+use crate::auth::ct_eq;
 use crate::{ApiError, AppState};
 
 /// Environment variable / flag that enables the endpoint.
@@ -33,11 +34,6 @@ pub fn router(state: &AppState) -> Router<AppState> {
     Router::new()
         .nest_service("/mcp", service)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer))
-}
-
-/// Constant-time equality to avoid leaking key prefixes through timing.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 async fn require_bearer(State(state): State<AppState>, req: Request<Body>, next: Next) -> Result<Response, ApiError> {
