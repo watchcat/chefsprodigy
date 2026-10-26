@@ -16,6 +16,10 @@ pub enum ScraperError {
     LlmUnavailable,
     #[error("llm error: {0}")]
     Llm(String),
+    /// The model endpoint refused for usage reasons: gateway quota (429), vendor rate
+    /// limit (429) or billing (402). The API answers 429 `model_quota_exceeded`.
+    #[error("model quota exceeded: {0}")]
+    ModelQuotaExceeded(String),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("zip error: {0}")]

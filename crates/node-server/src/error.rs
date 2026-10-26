@@ -18,6 +18,8 @@ pub enum ApiError {
     Unprocessable(String),
     /// Upstream site could not be fetched.
     BadGateway(String),
+    /// The model gateway or vendor refused for usage reasons (quota, rate limit, billing).
+    QuotaExceeded(String),
     /// A required capability (e.g. the LLM) is not configured.
     ServiceUnavailable(String),
     Internal(anyhow::Error),
@@ -35,6 +37,7 @@ impl ApiError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            Self::QuotaExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -53,7 +56,7 @@ impl IntoResponse for ApiError {
                 .into_response();
         }
         let message = match &self {
-            Self::BadGateway(m) | Self::ServiceUnavailable(m) => {
+            Self::BadGateway(m) | Self::ServiceUnavailable(m) | Self::QuotaExceeded(m) => {
                 tracing::warn!(status = %status, error = %m, "upstream failure");
                 m.clone()
             }
@@ -66,7 +69,12 @@ impl IntoResponse for ApiError {
                 "internal server error".to_string()
             }
         };
-        (status, Json(json!({ "error": message }))).into_response()
+        let mut body = json!({ "error": message });
+        if matches!(self, Self::QuotaExceeded(_)) {
+            // A stable code so the UI can say "quota" without parsing the message.
+            body["code"] = json!("model_quota_exceeded");
+        }
+        (status, Json(body)).into_response()
     }
 }
 
@@ -88,6 +96,7 @@ impl From<ScraperError> for ApiError {
             }
             ScraperError::NoRecipeInPhotos(_) => Self::Unprocessable(e.to_string()),
             ScraperError::Llm(m) => Self::BadGateway(format!("llm failure: {m}")),
+            ScraperError::ModelQuotaExceeded(_) => Self::QuotaExceeded(e.to_string()),
             ScraperError::TranslationIncomplete(m) => {
                 Self::BadGateway(format!("translation failed: {m}"))
             }

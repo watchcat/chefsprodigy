@@ -33,6 +33,9 @@ The import dialog now includes a responsive From photo tab with a camera-capable
 ### RN-50 · Kanban tooling (S)
 `scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`).
 
+### RN-49 · Navbar logo and PWA icons (S)
+PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and service-worker shell updated.
+
 ## Archived 2026-10-23
 
 ### RN-20 · Frontend PWA with Cook Mode (L)

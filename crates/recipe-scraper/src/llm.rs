@@ -1026,8 +1026,23 @@ impl RigExtractor {
     /// Connect to `reference` (`vendor/model`); credentials come from the
     /// vendor's usual environment variable (e.g. `ANTHROPIC_API_KEY`).
     pub fn new(reference: &str) -> Result<Self, ScraperError> {
+        Self::with_options(reference, connect_options())
+    }
+
+    /// Connect to `reference` through `base_url` (an LLM gateway, a test server)
+    /// with `api_key`, reading nothing from the environment.
+    pub fn connect(reference: &str, base_url: &str, api_key: &str) -> Result<Self, ScraperError> {
+        Self::with_options(
+            reference,
+            ConnectOptions::new()
+                .api_key(api_key.to_string())
+                .base_url(base_url.to_string()),
+        )
+    }
+
+    fn with_options(reference: &str, options: ConnectOptions) -> Result<Self, ScraperError> {
         let model = Catalog::builtin()
-            .connect_with(reference, connect_options())
+            .connect_with(reference, options)
             .map_err(|e| ScraperError::Llm(format!("cannot connect to {reference}: {e}")))?;
         Ok(Self {
             model,
@@ -1065,16 +1080,53 @@ impl RigExtractor {
             .preamble(preamble)
             .temperature(0.0)
             .output_schema(schema_for!(T));
-        let response = self
-            .model
-            .call(request)
-            .await
-            .map_err(|e| ScraperError::Llm(e.to_string()))?;
+        let response = self.model.call(request).await.map_err(|e| {
+            classify_model_error(
+                e.provider_response_status().map(|s| s.as_u16()),
+                e.provider_response_json().ok().flatten(),
+                e.provider_response_body().map(str::to_string),
+                e.to_string(),
+            )
+        })?;
         let text = response.text();
         tracing::debug!(model = %self.reference, chars = text.len(), "llm reply received");
         tracing::trace!(reply = %text, "llm reply body");
         Ok(text)
     }
+}
+
+/// Turn a failed model call into a `ScraperError`. A 429 or 402 from the
+/// endpoint (gateway quota, vendor rate limit, billing) becomes
+/// [`ScraperError::ModelQuotaExceeded`] with a sentence naming the limit and the
+/// endpoint's own message; anything else stays a generic [`ScraperError::Llm`].
+pub fn classify_model_error(
+    status: Option<u16>,
+    body: Option<serde_json::Value>,
+    raw_body: Option<String>,
+    display: String,
+) -> ScraperError {
+    let code = match status {
+        Some(code @ (429 | 402)) => code,
+        _ => return ScraperError::Llm(display),
+    };
+    let field = |name: &str| {
+        body.as_ref()
+            .and_then(|b| b.pointer(&format!("/error/{name}")))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let kind = field("type").unwrap_or_default();
+    let detail = field("message")
+        .or_else(|| raw_body.map(|b| b.trim().to_string()))
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| format!("HTTP {code}"));
+    let what = match (code, kind.as_str()) {
+        (402, _) => "the model account needs payment",
+        (_, "quota_exceeded") => "the model quota for this node is used up",
+        (_, "rate_limit_error") => "the model rate limit was reached, try again shortly",
+        _ => "the model refused the request because of a usage limit",
+    };
+    ScraperError::ModelQuotaExceeded(format!("{what} ({detail})"))
 }
 
 /// Parse JSON from model text, tolerating code fences and surrounding prose.

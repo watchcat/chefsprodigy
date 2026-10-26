@@ -16,10 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-67 · Hub: model quota-exceeded mapping (S)
-Gateway 429/402 surfaces as a readable `model_quota_exceeded` error (HTTP 429) instead of a generic model failure.
-- Acceptance: API test with a fake extractor returning the gateway's error.
-
 ### RN-68 · llm-gateway v2: quotas, cache, admin API (M)
 Daily/monthly quotas, deterministic-reply cache, admin endpoints and BYOK per spec §5.2.
 - Acceptance: over-quota request gets 429 before any upstream call; a repeated label request is a cache hit; admin API tested.
@@ -88,6 +84,12 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-67 · Hub: model quota-exceeded mapping (S)
+Gateway 429/402 surfaces as a readable `model_quota_exceeded` error (HTTP 429) instead of a generic model failure.
+- Acceptance: API test with a fake extractor returning the gateway's error.
+
+- Done 2026-10-27: `RigExtractor` classifies a failed model call through rig's `provider_response_status()`: 429 or 402 from the gateway or vendor becomes `ScraperError::ModelQuotaExceeded`, worded by the error envelope's type (`quota_exceeded` → "the model quota for this node is used up", `rate_limit_error` → "rate limit was reached, try again shortly", 402 → "the model account needs payment") with the endpoint's own message appended; other failures stay `Llm`. The API maps it to `ApiError::QuotaExceeded` → HTTP 429 `{"error": "model quota exceeded: …", "code": "model_quota_exceeded"}`; MCP tools report the same sentence. New `RigExtractor::connect(reference, base_url, api_key)` connects without environment variables (gateway or test server). 7 new tests (227 total): five drive a real `RigExtractor` against a fake vendor answering 429/402/500, one API test with a quota-failing extractor, one MCP tool test. The UI already shows the server message verbatim; a localized string keyed on `code` is a possible follow-up.
 
 ### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
 New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
@@ -164,6 +166,3 @@ Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pa
 
 ### RN-48 · MiniMax-M3 default and lenient model-reply parsing (M)
 `LLM_MODEL=minimax/MiniMax-M3` via `.env`; rig reads vendor variables unless `LLM_API_KEY` overrides. Replies with missing/renamed fields, string ranges, time phrases, decimal commas and unit spellings now parse; gateway errors and rejected replies are logged.
-
-### RN-49 · Navbar logo and PWA icons (S)
-PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and service-worker shell updated.
