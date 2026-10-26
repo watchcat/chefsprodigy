@@ -19,8 +19,8 @@ reqwest = { workspace = true }
 rig-core = { workspace = true }
 image = { workspace = true }
 zip = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 url = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }

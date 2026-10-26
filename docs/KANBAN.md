@@ -16,14 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-74 · SSRF guard on user-supplied URL fetches (S)
-Harden `recipe-scraper` (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images, used by `ImportService::import_url`): resolve the hostname first and refuse loopback, link-local incl. cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918, CGNAT `100.64/10`, `fc00::/7`, multicast/unspecified addresses and any scheme other than `http`/`https`; re-check every redirect hop and connect to the checked address. A builder flag `allow_private_hosts` exists only for tests with local servers. Spec: `docs/SPEC-hosted-platform.md` §6.
-- Acceptance: tests show `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a public URL redirecting to a private address are refused with a clear error; public URLs still import; the model client is unaffected.
-
-### RN-65 · deploy/: Compose, Caddy, hubctl, backup job (M)
-Files described in the spec §3, §4.7, §5.5, §5.6 plus a deployment how-to for one VPS behind Cloudflare.
-- Acceptance: `hubctl create demo` brings up a routed hub on a fresh box; `hubctl backup demo` lands an archive in R2.
-
 ### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
 New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
 - Acceptance: a hub works unchanged with `MINIMAX_ANTHROPIC_API_BASE` pointed at the gateway; usage recorded per hub.
@@ -85,6 +77,10 @@ Export the SQLite file plus images as a zip and import it back. Required for the
 The < 20 MB RSS goal has never been measured (sandbox blocked `ps`). Required for the hosted platform (spec §7): sets hub density per VPS.
 - Acceptance: a script in `scripts/` prints RSS after startup and 50 requests; number recorded in README.
 
+### RN-65 · deploy/: Compose, Caddy, hubctl, backup job (M)
+Files described in the spec §3, §4.7, §5.5, §5.6 plus a deployment how-to for one VPS behind Cloudflare.
+- Acceptance: `hubctl create demo` brings up a routed hub on a fresh box; `hubctl backup demo` lands an archive in R2.
+
 ---
 
 ## In Progress
@@ -100,6 +96,12 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-74 · SSRF guard on user-supplied URL fetches (S)
+Harden `recipe-scraper` (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images, used by `ImportService::import_url`): resolve the hostname first and refuse loopback, link-local incl. cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918, CGNAT `100.64/10`, `fc00::/7`, multicast/unspecified addresses and any scheme other than `http`/`https`; re-check every redirect hop and connect to the checked address. A builder flag `allow_private_hosts` exists only for tests with local servers. Spec: `docs/SPEC-hosted-platform.md` §6.
+- Acceptance: tests show `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a public URL redirecting to a private address are refused with a clear error; public URLs still import; the model client is unaffected.
+
+- Done 2026-10-26: new `recipe-scraper/src/ssrf.rs`. `UrlGuard` checks scheme (`http`/`https` only), literal IP hosts and every DNS answer for a hostname; `blocked_reason` classifies loopback, RFC 1918, CGNAT `100.64/10`, link-local `169.254/16` + `fe80::/10`, ULA `fc00::/7`, multicast, unspecified and reserved ranges, judging IPv4 embedded in IPv6 (mapped, NAT64, 6to4) as IPv4. The importer's reqwest client uses `GuardedResolver` (system lookup, every answer checked, connection pinned to the checked address) and `redirect_policy` (scheme + literal IP re-checked per hop, 10-hop limit); redirects reqwest will not follow (`file:`, `ftp:`) are refused explicitly. New `ScraperError::BlockedUrl` → HTTP 400 (`refusing to fetch …`) and MCP invalid-input. `RecipeImporter::allow_private_hosts()` unlocks loopback/private/CGNAT/ULA for tests only, never link-local or multicast. Model client untouched (rig builds its own). 8 new tests (207 total), clippy and rustfmt clean.
 
 ### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
 `NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.

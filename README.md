@@ -10,7 +10,8 @@ translates recipes on demand into the language you read.
 
 - **Import from anywhere**: Schema.org JSON-LD pages (free, no model needed), unstructured
   text (social captions, chat messages), photos of recipe cards or cookbook pages with the
-  finished dish as cover, and Mealie 1.x backups.
+  finished dish as cover, and Mealie 1.x backups. URL fetches pass an SSRF guard: nothing
+  on loopback, private or cloud-metadata ranges is ever requested, redirects included.
 - **3-tier ingredients**: original wording, metric amount and unit, snake_case canonical id
   with a specialty flag, so shopping lists can be merged and split between the supermarket
   and the specialty store.

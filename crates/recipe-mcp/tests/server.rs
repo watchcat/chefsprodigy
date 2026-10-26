@@ -24,7 +24,8 @@ async fn setup() -> (RunningService<RoleClient, ()>, Db) {
     let db = Db::open(dir.join("recipes.db")).await.unwrap();
     let server = RecipeMcpServer::new(
         db.clone(),
-        RecipeImporter::new(Arc::new(HeuristicExtractor)),
+        // Stand-in sites run on loopback, which the SSRF guard refuses by default.
+        RecipeImporter::new(Arc::new(HeuristicExtractor)).allow_private_hosts(),
         ImageStore::new(dir.join("images")),
     );
 
@@ -336,6 +337,19 @@ async fn import_recipe_validates_input_and_reports_llm_absence() {
 
     let err = error_text(&call(&client, "import_recipe", json!({"source_url": "ftp://x/y"})).await);
     assert!(err.contains("http"), "{err}");
+
+    let err = error_text(
+        &call(
+            &client,
+            "import_recipe",
+            json!({"source_url": "http://169.254.169.254/latest/meta-data/"}),
+        )
+        .await,
+    );
+    assert!(
+        err.contains("refusing to fetch") && err.contains("169.254.169.254"),
+        "{err}"
+    );
 
     let err = error_text(
         &call(

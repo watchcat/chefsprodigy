@@ -82,6 +82,7 @@ impl From<ScraperError> for ApiError {
             ScraperError::Http(inner) => {
                 Self::BadGateway(format!("could not fetch source: {inner}"))
             }
+            ScraperError::BlockedUrl { .. } => Self::BadRequest(e.to_string()),
             ScraperError::LlmUnavailable | ScraperError::ModelCannotSeeImages(_) => {
                 Self::ServiceUnavailable(e.to_string())
             }

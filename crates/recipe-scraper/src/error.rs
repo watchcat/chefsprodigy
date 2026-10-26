@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum ScraperError {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("refusing to fetch {url}: {reason}")]
+    BlockedUrl { url: String, reason: String },
     #[error("input is empty")]
     EmptyInput,
     #[error(
