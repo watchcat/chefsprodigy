@@ -1,0 +1,44 @@
+# Base stack for one VPS behind Cloudflare (docs/SPEC-hosted-platform.md section 3).
+# hubctl copies this file into the deployment root next to the generated
+# compose.hubs.yml and runs `docker compose -f compose.yml -f compose.hubs.yml`.
+# llm-gateway (RN-66), platform (RN-69) and the provisioner (RN-73) join this file
+# when they ship; hubs live in compose.hubs.yml.
+name: chefslegacy
+
+services:
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:2.11-alpine
+    container_name: caddy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    environment:
+      CADDY_INGRESS_NETWORKS: chefs_net
+      CADDY_DOCKER_CADDYFILE_PATH: /etc/caddy/Caddyfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+    networks: [chefs_net]
+    mem_limit: 256m
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+networks:
+  # Caddy, hubs, llm-gateway and platform. Hubs need outbound internet (recipe pages,
+  # model vendor), so this one is not internal.
+  chefs_net:
+    name: chefs_net
+  # platform and provisioner only (phase 3). Internal: no route in or out.
+  control_net:
+    name: control_net
+    internal: true

@@ -77,10 +77,6 @@ Export the SQLite file plus images as a zip and import it back. Required for the
 The < 20 MB RSS goal has never been measured (sandbox blocked `ps`). Required for the hosted platform (spec §7): sets hub density per VPS.
 - Acceptance: a script in `scripts/` prints RSS after startup and 50 requests; number recorded in README.
 
-### RN-65 · deploy/: Compose, Caddy, hubctl, backup job (M)
-Files described in the spec §3, §4.7, §5.5, §5.6 plus a deployment how-to for one VPS behind Cloudflare.
-- Acceptance: `hubctl create demo` brings up a routed hub on a fresh box; `hubctl backup demo` lands an archive in R2.
-
 ---
 
 ## In Progress
@@ -96,6 +92,12 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-65 · deploy/: Compose, Caddy, hubctl, backup job (M)
+Files described in the spec §3, §4.7, §5.5, §5.6 plus a deployment how-to for one VPS behind Cloudflare.
+- Acceptance: `hubctl create demo` brings up a routed hub on a fresh box; `hubctl backup demo` lands an archive in R2.
+
+- Done 2026-10-26: `deploy/` holds `hubctl` (Python stdlib: init, create, remove [--purge], list, status, rotate-key, login-link, backup <name|all> [--local|--keep-local], restore, upgrade), `compose.yml` (caddy-docker-proxy 2.11, `chefs_net` + internal `control_net`), `templates/Caddyfile.tmpl` (Cloudflare ranges as trusted proxies, `CF-Connecting-IP`, 110 MB bodies, access log drops `token`, `hub_common` snippet imported by the hub labels, TLS_MODE origin|off), `env.example`, `backup.sh` and `README.md` (DNS, Origin CA, firewall, install, R2 via rclone, restore, local dry run). Backups take a host-side `VACUUM INTO` until RN-30's export endpoint exists; §4.5 steps 2 and 5 (gateway token, platform registration) wait for RN-66/RN-69; `login-link` mints RN-73 tokens (HMAC key = the NODE_API_KEY string). 17 unit tests with fake docker/rclone. Local Docker smoke 2026-10-26 with the current image: `create demo` routed by Host through Caddy (health 200, owner POST 201), MCP initialize through Caddy 200 `text/event-stream` with `Cache-Control: no-cache` and `X-Accel-Buffering: no` in 3 ms, SSRF guard 400 through the stack, backup archive holds the created recipe, container read-only / 128 MiB / 0.5 CPU / uid 65532 / `chefs_net` only, remove --purge clean. Not exercised here: Cloudflare, Origin CA and R2 upload (need a VPS).
 
 ### RN-74 · SSRF guard on user-supplied URL fetches (S)
 Harden `recipe-scraper` (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images, used by `ImportService::import_url`): resolve the hostname first and refuse loopback, link-local incl. cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918, CGNAT `100.64/10`, `fc00::/7`, multicast/unspecified addresses and any scheme other than `http`/`https`; re-check every redirect hop and connect to the checked address. A builder flag `allow_private_hosts` exists only for tests with local servers. Spec: `docs/SPEC-hosted-platform.md` §6.
@@ -166,11 +168,3 @@ PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and se
 
 ### RN-50 · Kanban tooling (S)
 `scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`).
-
-### RN-39 · UI: shopping list builder (M)
-The PWA now has a `#/shopping` builder, linked from the library and primary navigation. It loads local recipes into an accessible multi-select basket with per-recipe serving inputs and optional comma-separated pantry exclusions. It calls `POST /api/v1/shopping-list`, separates basic groceries from specialty items, and persists the basket, pantry text, and independently checked grocery rows in `localStorage`.
-- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: Beef Pho and Quick Noodle Bowl produced an aggregated `600 g` Rice Noodles line for two recipes, Fish Sauce appeared under Specialty items, and Salt was excluded through the pantry field. A checked Rice Noodles row remained checked after a page reload and rebuilt list; browser console had no errors.
-
-### RN-46 · UI: import from photos (M)
-The import dialog now includes a responsive From photo tab with a camera-capable 1–6 image picker, local thumbnails, size/count feedback, a privacy disclosure, and visible analysis progress. It posts repeated multipart `photos` plus `is_public` to `POST /api/v1/import/photo`, renders errors inline, and opens a created recipe on success.
-- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a readable recipe-card JPEG imported through MiniMax-M3 as Lemon Herb Orzo and opened in detail; a logo image returned an inline 422 no-recipe message; an isolated no-model node returned the inline 503 vision-capability message. Browser console had no errors.

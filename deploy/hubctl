@@ -1,0 +1,664 @@
+#!/usr/bin/env python3
+"""hubctl: run Chef's Prodigy hubs on one VPS behind Cloudflare.
+
+Standard library only; see docs/SPEC-hosted-platform.md section 5.6 and
+deploy/README.md. Everything lives under the root (``--root``, ``HUBCTL_ROOT``
+or /srv/chefslegacy):
+
+    .env                 platform-level settings: DOMAIN, HUB_IMAGE, TLS_MODE, R2_REMOTE, ...
+    compose.yml          base stack (caddy + networks), copied from deploy/compose.yml
+    compose.hubs.yml     generated: one service per hub
+    caddy/Caddyfile      generated from deploy/templates/Caddyfile.tmpl
+    caddy/certs/         origin.pem + origin.key (Cloudflare Origin CA) when TLS_MODE=origin
+    hubs/<name>/.env     per-hub secrets (0600): NODE_API_KEY and the hub's settings
+    hubs/<name>/data/    recipes.db and images/, owned by uid 65532 (the image's user)
+    backups/<name>/      archives while they are uploaded to R2
+
+Commands: init, create, remove [--purge], list, status, rotate-key, login-link,
+backup <name|all> [--local|--keep-local], restore <name> <archive>, upgrade [name|all].
+Tests: python3 -I -m unittest discover -s deploy/tests
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import hmac
+import os
+import re
+import secrets
+import shutil
+import sqlite3
+import string
+import subprocess
+import sys
+import tempfile
+import time
+import zipfile
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+DEFAULT_ROOT = "/srv/chefslegacy"
+HUB_UID = 65532  # distroless "nonroot": the user the hub image runs as
+RESERVED_NAMES = {
+    "www", "api", "mail", "admin", "gateway", "llm-gateway", "platform", "provisioner", "caddy",
+}
+NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+MAGIC_PREFIX = "chefsprodigy-magic:"
+MAGIC_TTL_SECONDS = 600
+HEALTH_TIMEOUT_SECONDS = 90
+HUB_ENV_PASSTHROUGH = (
+    "LLM_MODEL", "LLM_API_KEY", "MINIMAX_API_KEY", "MINIMAX_ANTHROPIC_API_BASE",
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "RUST_LOG",
+)
+
+HERE = Path(__file__).resolve().parent
+TEMPLATES = HERE / "templates"
+
+# Cloudflare's published proxy ranges (https://www.cloudflare.com/ips-v4 and /ips-v6).
+# Caddy trusts only these for the client IP header; refresh when Cloudflare changes them.
+CLOUDFLARE_RANGES = [
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+    "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+]
+
+# One service per hub (docs/SPEC-hosted-platform.md section 5.6). The double braces
+# around "upstreams 8080" survive str.format and are what caddy-docker-proxy expects.
+HUB_SERVICE_TEMPLATE = """\
+  hub-{name}:
+    image: {image}
+    container_name: hub-{name}
+    env_file: hubs/{name}/.env
+    environment:
+      TOKIO_WORKER_THREADS: "2"
+    volumes: ["./hubs/{name}/data:/data"]
+    networks: [chefs_net]
+    labels:
+      caddy: {site}
+      caddy.import: hub_common
+      caddy.reverse_proxy: "{{{{upstreams 8080}}}}"
+      caddy.reverse_proxy.flush_interval: "-1"
+    mem_limit: {mem_limit}
+    cpus: "{cpus}"
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/node-server", "healthcheck"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+"""
+
+
+class HubctlError(Exception):
+    """A user-facing error: printed as one line, exit status 2."""
+
+
+# ----------------------------------------------------------------------------- helpers
+
+
+def validate_name(name: str) -> str:
+    if not NAME_RE.match(name or ""):
+        raise HubctlError(
+            f"{name!r} is not a valid hub name: lowercase letters, digits and hyphens, "
+            "1-63 characters, no leading or trailing hyphen"
+        )
+    if name in RESERVED_NAMES:
+        raise HubctlError(f"{name!r} is reserved and cannot be a hub name")
+    return name
+
+
+def read_env_file(path: Path) -> Dict[str, str]:
+    """KEY=VALUE lines; blank lines and # comments ignored; surrounding quotes dropped."""
+    values: Dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def env_line(key: str, value: str) -> str:
+    if value == "" or any(c in value for c in " #\"'"):
+        return f'{key}="{value}"'
+    return f"{key}={value}"
+
+
+def write_secret_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    os.chmod(path, 0o600)
+
+
+def write_if_changed(path: Path, text: str) -> bool:
+    if path.exists() and path.read_text() == text:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return True
+
+
+def utc_stamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def own_by_hub(path: Path) -> None:
+    """Give the hub's uid the data directory; needs root, so only warn elsewhere."""
+    try:
+        for entry in [path, *path.rglob("*")]:
+            os.chown(entry, HUB_UID, HUB_UID)
+    except PermissionError:
+        print(
+            f"warning: could not chown {path} to uid {HUB_UID}; run hubctl as root on the "
+            "server so the hub can write its data",
+            file=sys.stderr,
+        )
+
+
+def snapshot_sqlite(src: Path, dest: Path) -> None:
+    """A consistent copy of a live (WAL) database via VACUUM INTO."""
+    con = sqlite3.connect(str(src), isolation_level=None)
+    try:
+        con.execute("VACUUM INTO ?", (str(dest),))
+    finally:
+        con.close()
+
+
+def mint_magic_token(key: str, now: Optional[float] = None) -> Tuple[str, int]:
+    """`<expires>.<nonce>.<mac>` per docs/SPEC-hosted-platform.md section 4.6; the HMAC
+    key is the NODE_API_KEY string as stored in the hub's .env."""
+    expires = int((now if now is not None else time.time()) + MAGIC_TTL_SECONDS)
+    nonce = secrets.token_hex(8)
+    message = f"{MAGIC_PREFIX}{expires}:{nonce}".encode()
+    mac = hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
+    return f"{expires}.{nonce}.{mac}", expires
+
+
+# ----------------------------------------------------------------------------- config
+
+
+class Config:
+    def __init__(self, root: Path):
+        self.root = root
+        self.env = read_env_file(root / ".env")
+        self.domain = self.env.get("DOMAIN", "").strip().rstrip(".")
+        self.hub_image = self.env.get("HUB_IMAGE", "ghcr.io/watchcat/chefsprodigy:latest")
+        self.tls_mode = self.env.get("TLS_MODE", "origin")
+        self.r2_remote = self.env.get("R2_REMOTE", "").rstrip("/")
+        self.hub_mem_limit = self.env.get("HUB_MEM_LIMIT", "128m")
+        self.hub_cpus = self.env.get("HUB_CPUS", "0.5")
+
+    def require(self) -> None:
+        env_path = self.root / ".env"
+        if not env_path.exists():
+            raise HubctlError(f"{env_path} is missing; copy deploy/env.example there and fill it in")
+        if not self.domain:
+            raise HubctlError(f"DOMAIN is not set in {env_path}")
+        if self.tls_mode not in ("origin", "off"):
+            raise HubctlError("TLS_MODE must be 'origin' (Cloudflare Origin CA) or 'off' (local tests)")
+
+    @property
+    def scheme(self) -> str:
+        return "http" if self.tls_mode == "off" else "https"
+
+    def site(self, name: str) -> str:
+        """Caddy site address for a hub: bare host for HTTPS, http:// prefix when TLS is off."""
+        host = f"{name}.{self.domain}"
+        return host if self.tls_mode == "origin" else f"http://{host}"
+
+    def public_url(self, name: str) -> str:
+        return f"{self.scheme}://{name}.{self.domain}"
+
+    def hub_dir(self, name: str) -> Path:
+        return self.root / "hubs" / name
+
+    def hubs(self) -> List[str]:
+        hubs_dir = self.root / "hubs"
+        if not hubs_dir.exists():
+            return []
+        return sorted(
+            d.name for d in hubs_dir.iterdir()
+            if d.is_dir() and not d.name.startswith(".") and (d / ".env").exists()
+        )
+
+
+class Docker:
+    """`docker` and `docker compose` for the stack; HUBCTL_DOCKER swaps the binary (tests)."""
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.binary = os.environ.get("HUBCTL_DOCKER", "docker")
+
+    def compose(self, *args: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+        root = self.cfg.root
+        files = ["-f", str(root / "compose.yml")]
+        if (root / "compose.hubs.yml").exists():
+            files += ["-f", str(root / "compose.hubs.yml")]
+        cmd = [
+            self.binary, "compose", "--progress", "quiet", "--project-directory", str(root),
+            "--env-file", str(root / ".env"), *files, *args,
+        ]
+        return subprocess.run(cmd, check=check, text=True, capture_output=capture)
+
+    def health(self, container: str) -> str:
+        result = subprocess.run(
+            [self.binary, "inspect", "-f", "{{.State.Health.Status}}", container],
+            check=False, text=True, capture_output=True,
+        )
+        status = result.stdout.strip()
+        return status if result.returncode == 0 and status else "absent"
+
+    def wait_healthy(self, container: str, timeout: float = HEALTH_TIMEOUT_SECONDS) -> str:
+        deadline = time.monotonic() + timeout
+        status = self.health(container)
+        while status not in ("healthy", "unhealthy") and time.monotonic() < deadline:
+            time.sleep(2)
+            status = self.health(container)
+        return status
+
+
+# ----------------------------------------------------------------------------- rendering
+
+
+def render_caddyfile(cfg: Config) -> bool:
+    template = string.Template((TEMPLATES / "Caddyfile.tmpl").read_text())
+    if cfg.tls_mode == "origin":
+        tls_directive = "    tls /certs/origin.pem /certs/origin.key"
+        apex_site = cfg.domain
+        global_extra = ""
+    else:
+        tls_directive = "    # TLS_MODE=off: plain HTTP, local tests only"
+        apex_site = f"http://{cfg.domain}"
+        global_extra = "    auto_https off"
+    text = template.substitute(
+        cloudflare_ranges=" ".join(CLOUDFLARE_RANGES),
+        tls_directive=tls_directive,
+        apex_site=apex_site,
+        domain=cfg.domain,
+        global_extra=global_extra,
+    )
+    return write_if_changed(cfg.root / "caddy" / "Caddyfile", text)
+
+
+def render_hubs_compose(cfg: Config) -> bool:
+    parts = ["# Generated by hubctl from deploy/hubctl; edit hubs/<name>/.env or .env instead.\n"]
+    hubs = cfg.hubs()
+    if not hubs:
+        parts.append("services: {}\n")
+    else:
+        parts.append("services:\n")
+        for name in hubs:
+            parts.append(HUB_SERVICE_TEMPLATE.format(
+                name=name, image=cfg.hub_image, site=cfg.site(name),
+                mem_limit=cfg.hub_mem_limit, cpus=cfg.hub_cpus,
+            ))
+    return write_if_changed(cfg.root / "compose.hubs.yml", "".join(parts))
+
+
+def write_hub_env(cfg: Config, name: str, values: Dict[str, str]) -> None:
+    order = ["NODE_API_KEY", "NODE_CHEF_NAME", "NODE_PUBLIC_URL", "NODE_AUTHOR_DID",
+             "NODE_HOST", "NODE_PORT", "NODE_DATA_DIR"]
+    lines = [
+        f"# Hub {name}, generated by hubctl. NODE_API_KEY is the owner's secret: keep this file 0600.",
+    ]
+    for key in order:
+        if key in values:
+            lines.append(env_line(key, values[key]))
+    rest = [k for k in values if k not in order]
+    if rest:
+        lines.append("# Model access copied from the platform .env (phase 0: hubs call the vendor directly).")
+        lines += [env_line(k, values[k]) for k in rest]
+    write_secret_file(cfg.hub_dir(name) / ".env", "\n".join(lines) + "\n")
+
+
+def ensure_base(cfg: Config, docker: Docker) -> None:
+    """Directories, base compose file, rendered Caddyfile, Caddy running. Idempotent."""
+    cfg.require()
+    for sub in ("hubs", "backups", "caddy/data", "caddy/config", "caddy/certs"):
+        (cfg.root / sub).mkdir(parents=True, exist_ok=True)
+    if cfg.tls_mode == "origin":
+        certs = cfg.root / "caddy" / "certs"
+        missing = [c for c in ("origin.pem", "origin.key") if not (certs / c).exists()]
+        if missing:
+            raise HubctlError(
+                f"TLS_MODE=origin needs {' and '.join(missing)} in {certs} (a Cloudflare Origin CA "
+                f"certificate for {cfg.domain} and *.{cfg.domain}); see deploy/README.md, or set "
+                "TLS_MODE=off for a local test"
+            )
+    base_src = (HERE / "compose.yml").read_text()
+    write_if_changed(cfg.root / "compose.yml", base_src)
+    caddy_was_running = docker.health("caddy") not in ("absent",)
+    caddyfile_changed = render_caddyfile(cfg)
+    render_hubs_compose(cfg)
+    docker.compose("up", "-d", "caddy")
+    if caddyfile_changed and caddy_was_running:
+        docker.compose("restart", "caddy")
+
+
+# ----------------------------------------------------------------------------- commands
+
+
+def cmd_init(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    ensure_base(cfg, docker)
+    print(f"root {cfg.root} ready: domain {cfg.domain}, TLS {cfg.tls_mode}, hub image {cfg.hub_image}")
+    print(f"hubs: {', '.join(cfg.hubs()) or 'none yet'}")
+    return 0
+
+
+def cmd_create(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    name = validate_name(args.name)
+    ensure_base(cfg, docker)
+    env_path = cfg.hub_dir(name) / ".env"
+    values = read_env_file(env_path)
+    new_key = "NODE_API_KEY" not in values
+    values.setdefault("NODE_API_KEY", secrets.token_hex(32))
+    if args.chef:
+        values["NODE_CHEF_NAME"] = args.chef
+    values.setdefault("NODE_CHEF_NAME", name.capitalize())
+    values["NODE_PUBLIC_URL"] = cfg.public_url(name)
+    if args.author_did:
+        values["NODE_AUTHOR_DID"] = args.author_did
+    values.setdefault("NODE_HOST", "0.0.0.0")
+    values.setdefault("NODE_PORT", "8080")
+    values.setdefault("NODE_DATA_DIR", "/data")
+    for key in HUB_ENV_PASSTHROUGH:
+        if key not in values and cfg.env.get(key):
+            values[key] = cfg.env[key]
+
+    data_dir = cfg.hub_dir(name) / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    own_by_hub(data_dir)
+    write_hub_env(cfg, name, values)
+    render_hubs_compose(cfg)
+    docker.compose("up", "-d", f"hub-{name}")
+    status = docker.wait_healthy(f"hub-{name}")
+
+    print(f"hub {name} is {'up' if status == 'healthy' else status} at {cfg.public_url(name)}")
+    if new_key:
+        print(f"owner key (shown once, store it safely): {values['NODE_API_KEY']}")
+    url, expires = login_url(cfg, name, values["NODE_API_KEY"])
+    print(f"sign-in link (valid until {fmt_time(expires)}, accepted by hubs with RN-73): {url}")
+    return 0 if status == "healthy" else 1
+
+
+def cmd_remove(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    name = validate_name(args.name)
+    hub_dir = cfg.hub_dir(name)
+    parked_root = cfg.root / "hubs" / ".removed"
+    if hub_dir.exists():
+        if (cfg.root / "compose.hubs.yml").exists():
+            docker.compose("rm", "-s", "-f", f"hub-{name}")
+        parked_root.mkdir(parents=True, exist_ok=True)
+        parked = parked_root / f"{name}-{utc_stamp()}"
+        hub_dir.rename(parked)
+        render_hubs_compose(cfg)
+        print(f"hub {name} removed; its data is kept in {parked} (hubctl remove {name} --purge deletes it)")
+    elif not args.purge:
+        print(f"hub {name} does not exist")
+    if args.purge:
+        parked = sorted(parked_root.glob(f"{name}-*")) if parked_root.exists() else []
+        for path in parked:
+            shutil.rmtree(path)
+        print(f"purged {len(parked)} data director{'y' if len(parked) == 1 else 'ies'} of {name}")
+    return 0
+
+
+def cmd_list(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    cfg.require()
+    for name in cfg.hubs():
+        print(f"{name:<24} {cfg.public_url(name)}")
+    return 0
+
+
+def cmd_status(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    cfg.require()
+    print(f"{'caddy':<24} {'':<44} {docker.health('caddy')}")
+    for name in cfg.hubs():
+        print(f"{name:<24} {cfg.public_url(name):<44} {docker.health(f'hub-{name}')}")
+    return 0
+
+
+def cmd_rotate_key(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    name = validate_name(args.name)
+    cfg.require()
+    env_path = cfg.hub_dir(name) / ".env"
+    values = read_env_file(env_path)
+    if not values:
+        raise HubctlError(f"hub {name} does not exist")
+    values["NODE_API_KEY"] = secrets.token_hex(32)
+    write_hub_env(cfg, name, values)
+    render_hubs_compose(cfg)
+    docker.compose("up", "-d", "--force-recreate", f"hub-{name}")
+    status = docker.wait_healthy(f"hub-{name}")
+    print(f"hub {name} restarted with a new key ({status}); sessions and MCP clients must sign in again")
+    print(f"owner key (shown once, store it safely): {values['NODE_API_KEY']}")
+    return 0 if status == "healthy" else 1
+
+
+def login_url(cfg: Config, name: str, key: str) -> Tuple[str, int]:
+    token, expires = mint_magic_token(key)
+    return f"{cfg.public_url(name)}/api/v1/auth/magic?token={token}", expires
+
+
+def fmt_time(epoch: int) -> str:
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def cmd_login_link(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    name = validate_name(args.name)
+    cfg.require()
+    key = read_env_file(cfg.hub_dir(name) / ".env").get("NODE_API_KEY")
+    if not key:
+        raise HubctlError(f"hub {name} does not exist")
+    url, expires = login_url(cfg, name, key)
+    print(f"{url}")
+    print(f"valid until {fmt_time(expires)}, single use, accepted by hubs with RN-73 or later")
+    return 0
+
+
+def backup_hub(cfg: Config, name: str, stamp: str) -> Optional[Path]:
+    data = cfg.hub_dir(name) / "data"
+    db = data / "recipes.db"
+    if not db.exists():
+        print(f"{name}: no recipes.db yet, skipped")
+        return None
+    out_dir = cfg.root / "backups" / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    archive = out_dir / f"{name}-{stamp}.zip"
+    with tempfile.TemporaryDirectory() as tmp:
+        snapshot = Path(tmp) / "recipes.db"
+        snapshot_sqlite(db, snapshot)
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.write(snapshot, "recipes.db", compress_type=zipfile.ZIP_DEFLATED)
+            images = data / "images"
+            if images.is_dir():
+                for image in sorted(p for p in images.rglob("*") if p.is_file()):
+                    zf.write(image, f"images/{image.relative_to(images).as_posix()}", compress_type=zipfile.ZIP_STORED)
+    return archive
+
+
+def upload(cfg: Config, local: Path, remote_path: str, keep_local: bool) -> None:
+    rclone = os.environ.get("HUBCTL_RCLONE", "rclone")
+    target = f"{cfg.r2_remote}/{remote_path}"
+    subprocess.run([rclone, "copyto", str(local), target], check=True)
+    print(f"uploaded {local.name} to {target}")
+    if not keep_local:
+        local.unlink()
+
+
+def cmd_backup(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    cfg.require()
+    everything = args.name == "all"
+    targets = cfg.hubs() if everything else [validate_name(args.name)]
+    if not args.local and not cfg.r2_remote:
+        raise HubctlError(
+            "R2_REMOTE is not set in .env (an rclone remote such as r2:chefslegacy-backups); "
+            "configure it or pass --local to keep the archive on disk"
+        )
+    stamp = utc_stamp()
+    for name in targets:
+        if not (cfg.hub_dir(name) / ".env").exists():
+            raise HubctlError(f"hub {name} does not exist")
+        archive = backup_hub(cfg, name, stamp)
+        if archive is None:
+            continue
+        if args.local:
+            print(f"{name}: archive at {archive}")
+        else:
+            upload(cfg, archive, f"hubs/{name}/{archive.name}", args.keep_local)
+    if everything:
+        for label in ("gateway", "platform"):
+            db = cfg.root / label / "data" / f"{label}.db"
+            if not db.exists():
+                continue
+            out_dir = cfg.root / "backups" / label
+            out_dir.mkdir(parents=True, exist_ok=True)
+            snapshot = out_dir / f"{label}-{stamp}.db"
+            snapshot_sqlite(db, snapshot)
+            if args.local:
+                print(f"{label}: snapshot at {snapshot}")
+            else:
+                upload(cfg, snapshot, f"{label}/{snapshot.name}", args.keep_local)
+    return 0
+
+
+def cmd_restore(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    name = validate_name(args.name)
+    cfg.require()
+    archive = Path(args.archive)
+    if not (cfg.hub_dir(name) / ".env").exists():
+        raise HubctlError(f"hub {name} does not exist; create it first, then restore into it")
+    if not archive.exists():
+        raise HubctlError(f"{archive} does not exist")
+    with zipfile.ZipFile(archive) as zf:
+        members = zf.namelist()
+        for member in members:
+            path = Path(member)
+            if path.is_absolute() or ".." in path.parts:
+                raise HubctlError(f"{archive} contains an unsafe path {member!r}")
+        if "recipes.db" not in members:
+            raise HubctlError(f"{archive} has no recipes.db; is it a hub backup?")
+        docker.compose("stop", f"hub-{name}")
+        data = cfg.hub_dir(name) / "data"
+        if data.exists():
+            data.rename(data.with_name(f"data.pre-restore-{utc_stamp()}"))
+        data.mkdir(parents=True)
+        for member in members:
+            if member == "recipes.db" or (member.startswith("images/") and not member.endswith("/")):
+                zf.extract(member, data)
+    own_by_hub(data)
+    docker.compose("up", "-d", f"hub-{name}")
+    status = docker.wait_healthy(f"hub-{name}")
+    print(f"hub {name} restored from {archive.name} ({status}); the previous data directory is kept next to it")
+    return 0 if status == "healthy" else 1
+
+
+def cmd_upgrade(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
+    cfg.require()
+    targets = cfg.hubs() if args.name in (None, "all") else [validate_name(args.name)]
+    if not targets:
+        print("no hubs to upgrade")
+        return 0
+    render_hubs_compose(cfg)
+    services = [f"hub-{n}" for n in targets]
+    docker.compose("pull", *services)
+    failed = []
+    for name, service in zip(targets, services):
+        docker.compose("up", "-d", service)
+        status = docker.wait_healthy(service)
+        print(f"{name}: {status}")
+        if status != "healthy":
+            failed.append(name)
+    return 1 if failed else 0
+
+
+# ----------------------------------------------------------------------------- cli
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="hubctl", description=__doc__.split("\n\n")[0])
+    parser.add_argument("--root", default=os.environ.get("HUBCTL_ROOT", DEFAULT_ROOT),
+                        help=f"deployment root (default: $HUBCTL_ROOT or {DEFAULT_ROOT})")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("init", help="create the directory layout, render Caddy's config and start Caddy")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("create", help="create (or repair) a hub and start it")
+    p.add_argument("name")
+    p.add_argument("--chef", help="display name of the chef (default: the hub name)")
+    p.add_argument("--author-did", help="NODE_AUTHOR_DID for the federation manifest")
+    p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser("remove", help="stop and remove a hub; data is kept unless --purge")
+    p.add_argument("name")
+    p.add_argument("--purge", action="store_true", help="also delete the hub's data directory")
+    p.set_defaults(func=cmd_remove)
+
+    p = sub.add_parser("list", help="list hubs and their URLs")
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("status", help="health of Caddy and every hub")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("rotate-key", help="replace a hub's owner key and restart it")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_rotate_key)
+
+    p = sub.add_parser("login-link", help="mint a 10-minute magic sign-in link for a hub's owner")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_login_link)
+
+    p = sub.add_parser("backup", help="consistent archive of a hub (or all hubs) uploaded to R2")
+    p.add_argument("name", help="hub name or 'all' (all also copies gateway.db and platform.db)")
+    p.add_argument("--local", action="store_true", help="keep the archive under backups/ instead of uploading")
+    p.add_argument("--keep-local", action="store_true", help="upload and keep the local copy too")
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("restore", help="replace a hub's data with a backup archive")
+    p.add_argument("name")
+    p.add_argument("archive")
+    p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("upgrade", help="pull the configured hub image and restart hubs one by one")
+    p.add_argument("name", nargs="?", default="all", help="hub name or 'all' (default)")
+    p.set_defaults(func=cmd_upgrade)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    root = Path(args.root).expanduser()
+    cfg = Config(root)
+    docker = Docker(cfg)
+    try:
+        return int(args.func(cfg, docker, args) or 0)
+    except HubctlError as e:
+        print(f"hubctl: {e}", file=sys.stderr)
+        return 2
+    except subprocess.CalledProcessError as e:
+        print(f"hubctl: {' '.join(map(str, e.cmd))} failed with exit status {e.returncode}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

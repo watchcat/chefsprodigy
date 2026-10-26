@@ -12,6 +12,7 @@ inputs/
 docs/
 scripts/
 examples/
+deploy/
 *.md
 .env
 .env.*

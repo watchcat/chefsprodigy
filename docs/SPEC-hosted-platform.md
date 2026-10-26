@@ -362,7 +362,7 @@ through; access-log filter that deletes the `token` query parameter on
 `platform`.
 
 ### 5.6 hubctl (`deploy/hubctl`, Python, standard library)
-Commands: `create`, `remove [--purge]`, `list`, `rotate-key`, `login-link`, `backup`,
+Commands: `init`, `create`, `remove [--purge]`, `list`, `rotate-key`, `login-link`, `backup`,
 `restore`, `upgrade [name|all]`, `status`. Idempotent; refuses names that are not valid
 subdomains or collide with reserved ones (`www`, `api`, `mail`, `admin`, `gateway`).
 

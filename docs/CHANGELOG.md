@@ -22,6 +22,14 @@ The PWA now has `#/new` and `#/recipe/{id}/edit` views with accessible create/ed
 Removed the unreferenced 150 KB legacy vector app mark from the embedded bundle. The local PNG icon set remains the sole browser and manifest branding source, and the frontend scope now documents that arrangement.
 - Verified 2026-10-22: the static bundle is 176 KB and a repository-source scan finds no retired asset filename.
 
+### RN-39 · UI: shopping list builder (M)
+The PWA now has a `#/shopping` builder, linked from the library and primary navigation. It loads local recipes into an accessible multi-select basket with per-recipe serving inputs and optional comma-separated pantry exclusions. It calls `POST /api/v1/shopping-list`, separates basic groceries from specialty items, and persists the basket, pantry text, and independently checked grocery rows in `localStorage`.
+- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: Beef Pho and Quick Noodle Bowl produced an aggregated `600 g` Rice Noodles line for two recipes, Fish Sauce appeared under Specialty items, and Salt was excluded through the pantry field. A checked Rice Noodles row remained checked after a page reload and rebuilt list; browser console had no errors.
+
+### RN-46 · UI: import from photos (M)
+The import dialog now includes a responsive From photo tab with a camera-capable 1–6 image picker, local thumbnails, size/count feedback, a privacy disclosure, and visible analysis progress. It posts repeated multipart `photos` plus `is_public` to `POST /api/v1/import/photo`, renders errors inline, and opens a created recipe on success.
+- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a readable recipe-card JPEG imported through MiniMax-M3 as Lemon Herb Orzo and opened in detail; a logo image returned an inline 422 no-recipe message; an isolated no-model node returned the inline 503 vision-capability message. Browser console had no errors.
+
 ## Archived 2026-10-23
 
 ### RN-20 · Frontend PWA with Cook Mode (L)
