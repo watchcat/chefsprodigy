@@ -30,6 +30,9 @@ The PWA now has a `#/shopping` builder, linked from the library and primary navi
 The import dialog now includes a responsive From photo tab with a camera-capable 1–6 image picker, local thumbnails, size/count feedback, a privacy disclosure, and visible analysis progress. It posts repeated multipart `photos` plus `is_public` to `POST /api/v1/import/photo`, renders errors inline, and opens a created recipe on success.
 - Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a readable recipe-card JPEG imported through MiniMax-M3 as Lemon Herb Orzo and opened in detail; a logo image returned an inline 422 no-recipe message; an isolated no-model node returned the inline 503 vision-capability message. Browser console had no errors.
 
+### RN-50 · Kanban tooling (S)
+`scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`).
+
 ## Archived 2026-10-23
 
 ### RN-20 · Frontend PWA with Cook Mode (L)

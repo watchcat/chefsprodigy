@@ -5,6 +5,9 @@ Run: python3 -I -m unittest discover -s deploy/tests
 
 import contextlib
 import hashlib
+import http.server
+import json
+import threading
 import hmac
 import importlib.machinery
 import importlib.util
@@ -116,6 +119,88 @@ class HubctlCase(unittest.TestCase):
 
     def hub_env(self, name="demo"):
         return hubctl.read_env_file(self.root / "hubs" / name / ".env")
+
+
+class FakeGateway:
+    """A stand-in llm-gateway admin API: POST /admin/hubs with a bearer token."""
+
+    def __init__(self, admin_token="admin-secret"):
+        self.created = []
+        self.auth_headers = []
+        gateway = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                gateway.auth_headers.append(self.headers.get("Authorization"))
+                if self.headers.get("Authorization") != f"Bearer {admin_token}":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                name = body.get("name")
+                if name in gateway.created:
+                    self.send_response(409)
+                    self.end_headers()
+                    return
+                gateway.created.append(name)
+                reply = json.dumps({"name": name, "token": "a1" * 32, "created_at": "2026-10-27T00:00:00Z"}).encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class GatewayRegistration(HubctlCase):
+    def test_create_registers_the_hub_at_the_gateway_when_configured(self):
+        gateway = FakeGateway()
+        self.addCleanup(gateway.close)
+        self.write_env(GATEWAY_ADMIN_TOKEN="admin-secret", GATEWAY_ADMIN_PORT=str(gateway.port))
+
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        env = self.hub_env()
+        self.assertEqual(env["MINIMAX_ANTHROPIC_API_BASE"], "http://llm-gateway:8080/anthropic")
+        self.assertEqual(env["MINIMAX_API_KEY"], "a1" * 32, "the hub gets its gateway token, not the vendor key")
+        self.assertEqual(env["LLM_MODEL"], "minimax/MiniMax-M3")
+        self.assertEqual(gateway.created, ["demo"])
+        self.assertEqual(gateway.auth_headers, ["Bearer admin-secret"])
+        self.assertTrue(any("up -d caddy llm-gateway" in c for c in self.calls()), self.calls())
+        self.assertTrue((self.root / "gateway" / "data").is_dir())
+        self.assertIn("llm-gateway:", (self.root / "compose.yml").read_text())
+
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(gateway.created, ["demo"], "an already registered hub is not registered again")
+        self.assertEqual(self.hub_env()["MINIMAX_API_KEY"], "a1" * 32)
+
+    def test_without_a_gateway_token_hubs_get_the_vendor_key(self):
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        env = self.hub_env()
+        self.assertEqual(env["MINIMAX_API_KEY"], "vendor-key-for-tests")
+        self.assertNotIn("MINIMAX_ANTHROPIC_API_BASE", env)
+
+    def test_gateway_refusal_is_a_clear_error(self):
+        gateway = FakeGateway(admin_token="other")
+        self.addCleanup(gateway.close)
+        self.write_env(GATEWAY_ADMIN_TOKEN="admin-secret", GATEWAY_ADMIN_PORT=str(gateway.port))
+        code, out = self.run_hubctl("create", "demo")
+        self.assertNotEqual(code, 0)
+        self.assertIn("gateway", out.lower())
+        self.assertIn("401", out)
 
 
 class NameValidation(unittest.TestCase):
@@ -273,7 +358,7 @@ class BackupRestore(HubctlCase):
     def test_backup_uploads_a_consistent_archive(self):
         self.run_hubctl("create", "demo")
         con = self.seed_data()
-        (self.root / "gateway" / "data").mkdir(parents=True)
+        (self.root / "gateway" / "data").mkdir(parents=True, exist_ok=True)
         g = sqlite3.connect(self.root / "gateway" / "data" / "gateway.db")
         g.execute("CREATE TABLE t (x)")
         g.commit()

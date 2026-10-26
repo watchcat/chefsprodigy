@@ -33,8 +33,11 @@ import sqlite3
 import string
 import subprocess
 import sys
+import json
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -48,10 +51,15 @@ NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 MAGIC_PREFIX = "chefsprodigy-magic:"
 MAGIC_TTL_SECONDS = 600
 HEALTH_TIMEOUT_SECONDS = 90
+# Copied into a new hub's .env when hubs call the vendor directly (no gateway).
 HUB_ENV_PASSTHROUGH = (
     "LLM_MODEL", "LLM_API_KEY", "MINIMAX_API_KEY", "MINIMAX_ANTHROPIC_API_BASE",
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "RUST_LOG",
 )
+# Copied when the gateway holds the vendor keys; the hub gets a gateway token instead.
+HUB_ENV_PASSTHROUGH_GATEWAY = ("LLM_MODEL", "RUST_LOG")
+# Where hubs reach the gateway on chefs_net (docs/SPEC-hosted-platform.md section 5.1).
+GATEWAY_HUB_BASE = "http://llm-gateway:8080/anthropic"
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE / "templates"
@@ -204,6 +212,12 @@ class Config:
         self.r2_remote = self.env.get("R2_REMOTE", "").rstrip("/")
         self.hub_mem_limit = self.env.get("HUB_MEM_LIMIT", "128m")
         self.hub_cpus = self.env.get("HUB_CPUS", "0.5")
+        self.gateway_admin_token = self.env.get("GATEWAY_ADMIN_TOKEN", "")
+        self.gateway_admin_url = f"http://127.0.0.1:{self.env.get('GATEWAY_ADMIN_PORT', '8090')}"
+
+    @property
+    def gateway_enabled(self) -> bool:
+        return bool(self.gateway_admin_token)
 
     def require(self) -> None:
         env_path = self.root / ".env"
@@ -323,7 +337,7 @@ def write_hub_env(cfg: Config, name: str, values: Dict[str, str]) -> None:
             lines.append(env_line(key, values[key]))
     rest = [k for k in values if k not in order]
     if rest:
-        lines.append("# Model access copied from the platform .env (phase 0: hubs call the vendor directly).")
+        lines.append("# Model access: gateway base and hub token, or the vendor key from the platform .env when no gateway is configured.")
         lines += [env_line(k, values[k]) for k in rest]
     write_secret_file(cfg.hub_dir(name) / ".env", "\n".join(lines) + "\n")
 
@@ -331,8 +345,9 @@ def write_hub_env(cfg: Config, name: str, values: Dict[str, str]) -> None:
 def ensure_base(cfg: Config, docker: Docker) -> None:
     """Directories, base compose file, rendered Caddyfile, Caddy running. Idempotent."""
     cfg.require()
-    for sub in ("hubs", "backups", "caddy/data", "caddy/config", "caddy/certs"):
+    for sub in ("hubs", "backups", "caddy/data", "caddy/config", "caddy/certs", "gateway/data"):
         (cfg.root / sub).mkdir(parents=True, exist_ok=True)
+    own_by_hub(cfg.root / "gateway" / "data")
     if cfg.tls_mode == "origin":
         certs = cfg.root / "caddy" / "certs"
         missing = [c for c in ("origin.pem", "origin.key") if not (certs / c).exists()]
@@ -347,7 +362,7 @@ def ensure_base(cfg: Config, docker: Docker) -> None:
     caddy_was_running = docker.health("caddy") not in ("absent",)
     caddyfile_changed = render_caddyfile(cfg)
     render_hubs_compose(cfg)
-    docker.compose("up", "-d", "caddy")
+    docker.compose("up", "-d", "caddy", "llm-gateway")
     if caddyfile_changed and caddy_was_running:
         docker.compose("restart", "caddy")
 
@@ -378,9 +393,21 @@ def cmd_create(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
     values.setdefault("NODE_HOST", "0.0.0.0")
     values.setdefault("NODE_PORT", "8080")
     values.setdefault("NODE_DATA_DIR", "/data")
-    for key in HUB_ENV_PASSTHROUGH:
-        if key not in values and cfg.env.get(key):
-            values[key] = cfg.env[key]
+    if cfg.gateway_enabled:
+        for key in HUB_ENV_PASSTHROUGH_GATEWAY:
+            if key not in values and cfg.env.get(key):
+                values[key] = cfg.env[key]
+        registered = (
+            values.get("MINIMAX_ANTHROPIC_API_BASE") == GATEWAY_HUB_BASE
+            and values.get("MINIMAX_API_KEY")
+        )
+        if not registered:
+            values["MINIMAX_API_KEY"] = register_hub_at_gateway(cfg, name)
+            values["MINIMAX_ANTHROPIC_API_BASE"] = GATEWAY_HUB_BASE
+    else:
+        for key in HUB_ENV_PASSTHROUGH:
+            if key not in values and cfg.env.get(key):
+                values[key] = cfg.env[key]
 
     data_dir = cfg.hub_dir(name) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -396,6 +423,37 @@ def cmd_create(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
     url, expires = login_url(cfg, name, values["NODE_API_KEY"])
     print(f"sign-in link (valid until {fmt_time(expires)}, accepted by hubs with RN-73): {url}")
     return 0 if status == "healthy" else 1
+
+
+def register_hub_at_gateway(cfg: Config, name: str) -> str:
+    """`POST /admin/hubs` on the gateway's loopback admin port; returns the hub token."""
+    url = f"{cfg.gateway_admin_url}/admin/hubs"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps({"name": name}).encode(),
+        headers={
+            "Authorization": f"Bearer {cfg.gateway_admin_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            token = json.loads(response.read()).get("token")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace").strip()
+        if e.code == 409:
+            raise HubctlError(
+                f"the gateway already knows hub {name} but hubs/{name}/.env has no gateway token; "
+                "remove the hub at the gateway (admin API, RN-68) or restore the hub's .env"
+            ) from None
+        raise HubctlError(f"gateway refused the registration of {name}: HTTP {e.code} {detail}") from None
+    except (urllib.error.URLError, OSError) as e:
+        raise HubctlError(f"gateway unreachable at {url}: {e}") from None
+    if not token:
+        raise HubctlError("gateway answered without a token")
+    print(f"hub {name} registered at the gateway")
+    return token
 
 
 def cmd_remove(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
@@ -430,6 +488,7 @@ def cmd_list(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
 def cmd_status(cfg: Config, docker: Docker, args: argparse.Namespace) -> int:
     cfg.require()
     print(f"{'caddy':<24} {'':<44} {docker.health('caddy')}")
+    print(f"{'llm-gateway':<24} {cfg.gateway_admin_url + ' (admin, loopback)':<44} {docker.health('llm-gateway')}")
     for name in cfg.hubs():
         print(f"{name:<24} {cfg.public_url(name):<44} {docker.health(f'hub-{name}')}")
     return 0

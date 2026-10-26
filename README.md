@@ -69,7 +69,8 @@ data directory must be writable by uid 65532. The hosting design around this ima
 ### Deploying hubs for others
 
 `deploy/` holds the one-VPS stack from that spec: Docker Compose with Caddy behind
-Cloudflare, `hubctl` (create, backup, restore, upgrade hubs) and a nightly backup job to
+Cloudflare, the `llm-gateway` (vendor keys stay there; hubs get per-hub tokens and usage
+is recorded), `hubctl` (create, backup, restore, upgrade hubs) and a nightly backup job to
 Cloudflare R2. The step-by-step how-to is [deploy/README.md](deploy/README.md).
 
 ### Configuration (`.env`)

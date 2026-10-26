@@ -1,8 +1,8 @@
 # Base stack for one VPS behind Cloudflare (docs/SPEC-hosted-platform.md section 3).
 # hubctl copies this file into the deployment root next to the generated
 # compose.hubs.yml and runs `docker compose -f compose.yml -f compose.hubs.yml`.
-# llm-gateway (RN-66), platform (RN-69) and the provisioner (RN-73) join this file
-# when they ship; hubs live in compose.hubs.yml.
+# platform (RN-69) and the provisioner (RN-73) join this file when they ship; hubs
+# live in compose.hubs.yml.
 name: chefslegacy
 
 services:
@@ -28,6 +28,37 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  # LLM gateway (docs/SPEC-hosted-platform.md section 5.2): hubs call it on chefs_net with
+  # their hub token; it holds the vendor keys. The admin API is published on loopback only,
+  # for hubctl. Same image as the hubs, different entrypoint.
+  llm-gateway:
+    image: ${HUB_IMAGE:-ghcr.io/watchcat/chefsprodigy:latest}
+    container_name: llm-gateway
+    entrypoint: ["/usr/local/bin/llm-gateway"]
+    command: ["serve"]
+    environment:
+      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MINIMAX_ANTHROPIC_API_BASE: ${MINIMAX_ANTHROPIC_API_BASE:-https://api.minimax.io/anthropic}
+      TOKIO_WORKER_THREADS: "2"
+    ports:
+      - "127.0.0.1:${GATEWAY_ADMIN_PORT:-8090}:8080"
+    volumes: ["./gateway/data:/data"]
+    networks: [chefs_net]
+    mem_limit: 64m
+    cpus: "0.5"
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/llm-gateway", "healthcheck"]
       interval: 30s
       timeout: 3s
       start_period: 10s

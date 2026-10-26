@@ -197,7 +197,36 @@ docker compose --project-directory /tmp/chefs -f /tmp/chefs/compose.yml down
 `TLS_MODE=off` renders `http://` site addresses and `auto_https off`; never use it on a
 public host.
 
-## 10. Troubleshooting
+## 10. LLM gateway (phase 1)
+
+The gateway (`crates/llm-gateway`, same image, `entrypoint: llm-gateway`) keeps the vendor
+keys out of the hubs: each hub gets its own token, every call is recorded per hub and day,
+and quotas and a reply cache follow in RN-68. Enable it by setting `GATEWAY_ADMIN_TOKEN` in
+`.env` (`openssl rand -hex 32`) and running `hubctl init`. From then on `hubctl create`
+registers each new hub at the gateway and writes the hub token and
+`MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway:8080/anthropic` into the hub's `.env`; the
+hub's model client needs no change. Hubs created before that keep calling the vendor
+directly until you switch them:
+
+```sh
+TOKEN=$(curl -s -X POST http://127.0.0.1:8090/admin/hubs \
+  -H "authorization: Bearer $GATEWAY_ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"jacob"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+# in hubs/jacob/.env: MINIMAX_API_KEY=$TOKEN and MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway:8080/anthropic
+docker compose -f compose.yml -f compose.hubs.yml up -d --force-recreate hub-jacob
+```
+
+Usage per hub and day (requests, tokens, estimated cost once `model_prices` has rows):
+
+```sh
+curl -s "http://127.0.0.1:8090/admin/usage?hub=jacob&from=2026-10-01" -H "authorization: Bearer $GATEWAY_ADMIN_TOKEN"
+```
+
+Without an admin token the gateway still runs (passthrough only) and `docker exec
+llm-gateway /usr/local/bin/llm-gateway add-hub <name>` issues tokens on the command line.
+`gateway/data/gateway.db` is included in `hubctl backup all`.
+
+## 11. Troubleshooting
 
 - `hubctl status` shows `unhealthy`: `docker logs hub-<name>`; the health check is the
   binary's own `node-server healthcheck`.

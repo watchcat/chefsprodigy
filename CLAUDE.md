@@ -39,7 +39,8 @@ Strictly adhere to the following modular Workspace layout:
 │   ├── recipe-db/              # sqlx SQLite pool, repositories, FTS5 search queries
 │   ├── recipe-scraper/         # Schema.org parser + htmd + rig structured-output extractor + Mealie (.zip) importer
 │   ├── recipe-mcp/             # MCP Tools + shared ImportService (rig agents consume the MCP tools via the rig-rmcp crate)
-│   └── node-server/            # Binary: Axum HTTP/SSE server, CLI (stdio MCP mode), rust-embed static UI
+│   ├── node-server/            # Binary: Axum HTTP/SSE server, CLI (stdio MCP mode), rust-embed static UI
+│   └── llm-gateway/            # Binary: LLM gateway for hosted hubs (vendor key custody, hub tokens, usage; Messages passthrough)
 └── frontend/                   # Lightweight UI (PWA, Cook Mode with WakeLock API)
 ```
 
@@ -53,6 +54,7 @@ Always use these commands to verify your changes:
 - **Run tests:** `cargo test --workspace`
 - **Run node as HTTP server:** `cargo run -p node-server -- serve --port 8080`
 - **Run node in local MCP (stdio) mode:** `cargo run -p node-server -- mcp-stdio`
+- **Run the LLM gateway:** `cargo run -p llm-gateway -- serve --port 8090` (vendor keys and `GATEWAY_ADMIN_TOKEN` from the environment; `llm-gateway add-hub <name>` prints a hub token). A hub uses it by setting `MINIMAX_ANTHROPIC_API_BASE=http://<gateway>/anthropic` and `MINIMAX_API_KEY=<hub token>`.
 - **Backfill source languages:** `cargo run -p node-server -- backfill-language` (also runs in the background at `serve` startup)
 - **Container image:** `docker build -t chefsprodigy .` (distroless, non-root, `/data` volume, `TOKIO_WORKER_THREADS=2`). Its `HEALTHCHECK` runs `node-server healthcheck [--port]`, a loopback probe of `/api/v1/health` that exits 0 or 1, so the image needs no curl. Tags `v*` publish `ghcr.io/watchcat/chefsprodigy` through `.github/workflows/docker.yml`.
 - **Deployment tooling:** `deploy/` holds the one-VPS stack (Compose, Caddy, `hubctl`, backup job; how-to in `deploy/README.md`). Its tests: `python3 -I -m unittest discover -s deploy/tests` (no Docker needed).

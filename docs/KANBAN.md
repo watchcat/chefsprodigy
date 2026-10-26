@@ -16,10 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
-New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
-- Acceptance: a hub works unchanged with `MINIMAX_ANTHROPIC_API_BASE` pointed at the gateway; usage recorded per hub.
-
 ### RN-67 · Hub: model quota-exceeded mapping (S)
 Gateway 429/402 surfaces as a readable `model_quota_exceeded` error (HTTP 429) instead of a generic model failure.
 - Acceptance: API test with a fake extractor returning the gateway's error.
@@ -93,6 +89,12 @@ _(empty)_
 
 ## Done
 
+### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
+New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
+- Acceptance: a hub works unchanged with `MINIMAX_ANTHROPIC_API_BASE` pointed at the gateway; usage recorded per hub.
+
+- Done 2026-10-27: new crate `crates/llm-gateway` (lib + binary, same distroless image as the hub, `entrypoint: llm-gateway`). `POST /{anthropic|minimax}/v1/messages` authenticates the hub token (`x-api-key` or bearer; SHA-256 stored in `hubs.token_hash`), swaps it for the vendor key, drops hop-by-hop/credential headers, forwards the body unchanged, retries once on 5xx/429 or a connect error, caps two in-flight calls per hub, returns the vendor reply as is and upserts `usage_daily` (requests, tokens, cost from `model_prices`, 0 when unpriced). On `/anthropic` MiniMax models route to MiniMax, others to Anthropic. `stream: true` → 501. Errors use the Messages error envelope. Admin API behind `GATEWAY_ADMIN_TOKEN`: `POST/GET /admin/hubs`, `GET /admin/usage?hub=&from=&to=`; CLI `add-hub`, `healthcheck`. Schema already carries the RN-68 quota/cache/BYOK columns. Deploy: compose service `llm-gateway` (64 MiB, read-only, admin port on 127.0.0.1:8090), `hubctl create` registers hubs at the gateway when `GATEWAY_ADMIN_TOKEN` is set and writes the hub token + `MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway:8080/anthropic` instead of the vendor key. 13 Rust tests (fake vendors), 3 hubctl tests (fake gateway). End-to-end 2026-10-27: a local node with its model base pointed at the gateway imported a text recipe through MiniMax unchanged (201, 4 canonical ids) and the gateway recorded 1 request / 230 in / 293 out tokens for that hub.
+
 ### RN-65 · deploy/: Compose, Caddy, hubctl, backup job (M)
 Files described in the spec §3, §4.7, §5.5, §5.6 plus a deployment how-to for one VPS behind Cloudflare.
 - Acceptance: `hubctl create demo` brings up a routed hub on a fresh box; `hubctl backup demo` lands an archive in R2.
@@ -165,6 +167,3 @@ Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pa
 
 ### RN-49 · Navbar logo and PWA icons (S)
 PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and service-worker shell updated.
-
-### RN-50 · Kanban tooling (S)
-`scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`).

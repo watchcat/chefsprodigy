@@ -249,6 +249,13 @@ MINIMAX_API_KEY=…              hub token (gateway-issued), not the vendor key
 ### 5.2 llm-gateway (new crate `crates/llm-gateway`)
 Purpose: vendor key custody, quotas, cache, usage. Memory target under 30 MB.
 
+Status: v1 shipped 2026-10-27 (RN-66): `/anthropic/v1/messages` and `/minimax/v1/messages`
+passthrough (on the `/anthropic` prefix MiniMax models route to MiniMax, others to Anthropic),
+hub tokens (`x-api-key` or bearer, stored hashed), `usage_daily` rows, one retry on 5xx/429,
+two in-flight calls per hub, `stream: true` → 501, admin `POST/GET /admin/hubs` and
+`GET /admin/usage`, `llm-gateway add-hub` CLI, `healthcheck` subcommand. Quotas, the
+canonical-JSON cache, BYOK and the remaining admin endpoints are RN-68.
+
 Endpoints (data plane, hub token in `x-api-key` or `Authorization: Bearer`):
 - `POST /anthropic/v1/messages`: Messages-format passthrough (MiniMax, Anthropic). `stream: true`
   is forwarded without caching in v1 (or rejected with 501 if simpler).
