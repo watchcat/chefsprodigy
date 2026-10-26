@@ -1,0 +1,497 @@
+# Spec: Hosted platform on one VPS (hubs, model gateway, aggregator)
+
+Status: proposed, 2026-10-26; revised the same day after review (translations in
+federation, built-in healthcheck, network split and SSRF guard, magic-link login,
+cache canonicalization, seeded terms, resolved questions). Companion to
+`docs/ARCHITECTURE_AND_SCHEMAS.md` (the node), `docs/MCP_AND_API_SPEC.md` (its API) and
+`docs/SPEC-i18n.md`. Work items are tracked on the board in `docs/KANBAN.md` as RN-63 and up.
+
+## 1. Objective
+
+Run many recipe hubs for many people under `chefslegacy.com`, one hub per subdomain
+(`jacob.chefslegacy.com`), with a central search over everything public on the apex, on a
+single VPS with Docker Compose. Each hub stays the small single binary that exists today.
+Everything that is shared, expensive or sensitive moves into two platform services:
+
+- **llm-gateway**: the only process that talks to model vendors. Holds vendor keys, enforces
+  per-hub quotas, caches deterministic replies, records usage.
+- **platform**: the apex site. Hub registry, aggregator (federation poller and search index),
+  signup, transactional mail outbox, admin.
+
+Rate limiting lives in two places and nowhere else: model spend at the gateway, HTTP abuse
+at the edge (Cloudflare rules and Caddy), so the per-node limiter (RN-28) becomes optional.
+
+## 2. Decisions taken as defaults
+
+| Topic | Decision | Alternative kept open |
+|---|---|---|
+| Hosting | One VPS (4 GB, 2 vCPU class), Docker Compose, Ubuntu LTS | Fly.io machines with the same image |
+| Edge | Cloudflare proxied (orange cloud) for apex and `*.chefslegacy.com`; Origin CA wildcard cert at Caddy; VPS firewall allows 443 only from Cloudflare IPs | DNS-only with ACME DNS-01 at Caddy |
+| Routing | Caddy with caddy-docker-proxy; routes come from container labels | Traefik |
+| Networks | Two internal Docker networks: `chefs_net` (Caddy, platform, hubs, llm-gateway) and `control_net` (platform, provisioner); hubs have no route to the provisioner | |
+| Hub image | `ghcr.io/watchcat/chefsprodigy:<version>`, distroless, non-root, `/data` volume, no shell tools; health via `node-server healthcheck` | |
+| Model access | Hubs call llm-gateway only; gateway is a Rust crate in this workspace | LiteLLM proxy, Cloudflare AI Gateway |
+| Owner login | `NODE_API_KEY` stays the permanent master secret (API, MCP, direct login); short-lived signed magic links sign the owner in on any device without rotating it | |
+| Email | Transactional provider (Resend first) behind an outbox in `platform` | Postmark, SES |
+| Backups | Nightly per-hub export to Cloudflare R2 via rclone, 30-day retention by bucket lifecycle rule | restic |
+| Provisioning | `hubctl` CLI on the box (phase 0–2); platform-driven signup through a small privileged provisioner (phase 3) | |
+| Model cost | Platform key with per-hub free-tier quotas (§5.2); owners may add their own key (BYOK in the gateway) | |
+
+## 3. Architecture
+
+```
+                Internet
+                   │
+        Cloudflare: DNS, wildcard TLS, WAF, rate-limit rules, hides VPS IP
+                   │  (firewall: only Cloudflare ranges may reach :443)
+   ────────────────┼───────────────────────────────── VPS ─────────────────────
+                   ▼
+        Caddy (Origin CA cert; routes by Host header; sees CF-Connecting-IP)
+          chefslegacy.com        → platform:8080
+          jacob.chefslegacy.com  → hub-jacob:8080
+          maria.chefslegacy.com  → hub-maria:8080
+                   │
+        chefs_net (internal; nothing else is published)
+          ┌────────────┬────────────┬──────────────┬──────────────┐
+          │ hub-jacob  │ hub-maria  │ llm-gateway  │ platform     │
+          │ /data vol  │ /data vol  │ gateway.db   │ platform.db  │
+          └─────┬──────┴─────┬──────┴──────┬───────┴──────┬───────┘
+                │ model calls (hub token)  │ vendor key   │ polls manifests,
+                └──────────────────────────┘ MiniMax…     │ sends mail
+                                                          │
+        control_net (internal; platform and provisioner only)
+                                                          ▼
+                                                   provisioner (Docker socket)
+                                                          │
+                                                   Resend / Postmark (outbound mail)
+        backup job (cron): hub exports + gateway.db + platform.db → Cloudflare R2
+```
+
+Hubs, the gateway and the platform share `chefs_net`; only the platform also joins
+`control_net`, where the provisioner listens. A hub therefore has no network route to the
+provisioner, and the SSRF guard in the hub (§6) stops a hub owner from reaching the gateway,
+other hubs or the platform through URL import.
+
+Host layout:
+
+```
+/srv/chefslegacy/
+  compose.yml            caddy, llm-gateway, platform, provisioner, backup
+  compose.hubs.yml       generated by hubctl: one service per hub
+  .env                   platform-level secrets (vendor keys, admin tokens, R2)
+  caddy/                 Origin CA cert + key, Caddy data
+  gateway/data/          gateway.db
+  platform/data/         platform.db
+  hubs/<name>/.env       per-hub secrets (0600)
+  hubs/<name>/data/      recipes.db, images/
+  deploy/                hubctl, backup.sh, templates (checked into this repo under deploy/)
+```
+
+## 4. Data flows
+
+### 4.1 Visitor reads a recipe
+Browser → Cloudflare → Caddy (Host = `jacob.chefslegacy.com`) → `hub-jacob` → SQLite → JSON.
+The hub applies the owner/visitor rules from RN-61: visitors see public recipes only and
+cached translations only. No platform service is involved.
+
+### 4.2 Owner imports a recipe (URL, text, photos)
+1. Browser (session cookie) → hub. JSON-LD pages are parsed locally; no model call. Every
+   user-supplied URL (page and images) passes the SSRF guard (§6) before it is fetched.
+2. For text, photos or ingredient normalization the hub sends a Messages-format request to
+   `http://llm-gateway:8080/anthropic/v1/messages` with its **hub token** as `x-api-key`.
+3. Gateway: authenticate token → check daily/monthly quota → cache lookup → forward to the
+   vendor with the real key → record usage (tokens, estimated cost) → return the vendor's
+   reply unchanged. 429 with `{"error":{"type":"quota_exceeded"}}` when over quota.
+4. Hub stores the recipe and cover in `/data` and answers the browser. A 429 surfaces as
+   "model quota exhausted" (new error mapping, RN-67); JSON-LD imports keep working.
+
+### 4.3 Translation and labels
+Same path as 4.2. The hub caches per recipe and language in its own SQLite (RN-54/56), so
+a hub asks the gateway once per recipe and language.
+
+Cross-hub reuse at the gateway is limited: label requests go out in batches of up to 100
+canonical ids and two hubs rarely send the same batch, so a byte-identical request is the
+exception. Two measures make the cache useful anyway:
+
+- the gateway hashes a **canonical** form of the request (sorted object keys, no
+  insignificant whitespace, hub token excluded; §5.2), so identical content always hashes
+  the same regardless of serializer or key order;
+- the node ships a **seeded dictionary** of everyday ingredients (`canonical_terms` for
+  `en`, `ru`, `nl`, the ~200 most common ids such as `salt`, `garlic`, `onion`, `butter`,
+  `egg`, `olive_oil`) through a SQLite migration, so basic terms never cost a model call
+  on any hub (RN-75). Seeded rows carry `origin = 'human'` and are never overwritten by
+  the model; later additions come as further `INSERT OR IGNORE` migrations.
+
+### 4.4 Federation and search on the apex
+1. `platform` holds the registry: `name`, `internal_url` (`http://hub-jacob:8080`),
+   `public_url` (`https://jacob.chefslegacy.com`), owner, status.
+2. Every 10 minutes (with jitter) the poller fetches each hub's
+   `GET /api/v1/federation/manifest` over the internal network. Each manifest entry carries
+   `id`, `updated_at`, `content_hash` and `translations: [{lang, origin, stale, updated_at}]`
+   (RN-64). Translations need their own timestamps because saving one never changes the
+   recipe's `updated_at` or `content_hash`. The poller compares `(id, updated_at,
+   content_hash)` and every `(lang, updated_at)` pair with the index and fetches changed
+   recipes from `GET /api/v1/federation/recipes/{id}`, which returns the recipe together
+   with `translations: [RecipeTranslation]` (every stored translation, LLM or human).
+   Hubs only list public recipes there.
+3. The index stores one row per `(hub, recipe_id)` with title, tags, canonical ids, source
+   language, `content_hash`, `updated_at`, cover URL built from `public_url + image_path`,
+   plus one row per `(hub, recipe_id, lang)` for each federated translation (title, tags,
+   origin, stale flag, `updated_at`). The FTS5 table holds one row per language of each
+   recipe, the source language included (§5.3). Rows sharing a `content_hash` are shown as
+   one dish with several hubs ("also at …").
+4. `GET chefslegacy.com/api/v1/search?q=&ingredient=&lang=` and the search page return hits
+   linking to `https://jacob.chefslegacy.com/#/recipe/{id}`. With `lang` the hit carries the
+   title and tags of that language when the hub exposes such a translation, otherwise the
+   source wording, and says which language matched (`matched_lang`).
+5. Optional push (phase 2): a hub notifies `POST platform/api/v1/hubs/{name}/changed` with its
+   hub token after a public recipe or translation changes; the platform polls that hub
+   immediately.
+
+### 4.5 Provisioning a hub (phase 0–2, CLI)
+`hubctl create jacob --chef "Jacob"`:
+1. Generate `NODE_API_KEY` (32 random bytes, hex).
+2. Ask the gateway admin API for a hub token with the default quota.
+3. Write `hubs/jacob/.env` (0600) with the hub settings (§5.1).
+4. Regenerate `compose.hubs.yml` from the template and `docker compose up -d hub-jacob`.
+5. Register the hub in `platform` (admin API) so the poller picks it up.
+6. Print the owner key once and a magic login link (`hubctl login-link jacob`, §4.6); the
+   key is stored nowhere else.
+
+### 4.6 Owner login and signup
+
+**Magic links (RN-73).** `NODE_API_KEY` remains the permanent master secret for the API,
+MCP clients and direct login. For people, the hub additionally accepts a short-lived signed
+link so nobody has to type or keep a 64-character key:
+
+- Token: `<expires>.<nonce>.<mac>` where `expires` is a Unix timestamp at most 10 minutes
+  ahead, `nonce` is 8 random bytes (hex) and
+  `mac = HMAC-SHA256(key = NODE_API_KEY, msg = "chefsprodigy-magic:" + expires + ":" + nonce)`.
+- `GET /api/v1/auth/magic?token=…` on the hub verifies the MAC in constant time, rejects
+  expired or already-used tokens (an in-memory set of consumed nonces, pruned at expiry),
+  sets the `node_session` cookie exactly as `POST /auth/login` does and redirects to `/#/`
+  so the token leaves the address bar.
+- Who can mint a link: anything that holds the key. `hubctl login-link <name>` reads
+  `hubs/<name>/.env`; the provisioner offers `POST /hubs/{name}/login-link` to the platform
+  (phase 3); a logged-in owner can call `POST /api/v1/auth/magic-link` on their hub to sign
+  in on another device. The platform never stores `NODE_API_KEY`.
+- A link is sent only to the verified account email, is single use and expires in 10
+  minutes, so a leaked mail is a small window. `rotate-key` stays for compromise only;
+  rotating still invalidates sessions and MCP clients, which is now the exception rather
+  than the recovery path.
+
+**Signup (phase 3).** Visitor on the apex enters email → platform writes a mail to the
+outbox → provider sends a verification link → visitor picks a free subdomain → platform calls
+the **provisioner** (a tiny privileged container on `control_net` that owns the Docker
+socket and exposes only `create/remove/rotate-key/login-link`) → hub starts → platform asks
+the provisioner for a magic link and emails "your hub is ready, sign in" with it; the owner
+key is shown once in the browser for API and MCP use. "Email me a sign-in link" on the apex
+repeats the last step for existing owners on any device.
+
+### 4.7 Backup and restore
+Nightly cron on the host: for each hub, call `GET /api/v1/export` (owner key, produces a zip
+of a consistent SQLite copy via `VACUUM INTO` plus `images/`), then rclone to
+`r2://chefslegacy-backups/hubs/<name>/<date>.zip`; also copy `gateway.db` and `platform.db`.
+An R2 bucket lifecycle rule deletes objects after 30 days. Restore = `hubctl restore <name>
+<archive>` (stop hub, unpack into `hubs/<name>/data`, start). Owners can download the same
+export from their hub (RN-30).
+
+### 4.8 Updates
+GitHub Actions builds and pushes the image on tags. `hubctl upgrade all` pulls and restarts
+hubs one by one; migrations run at startup. The gateway and platform are updated the same
+way; each has a health endpoint used by Compose.
+
+## 5. Service contracts
+
+### 5.1 Hub (existing `node-server`), changes needed
+- `NODE_PUBLIC_URL` (e.g. `https://jacob.chefslegacy.com`): included in the federation
+  manifest as `node_url`; its host is added to the MCP allowlist automatically (RN-64).
+- Federation exposes translations (RN-64): manifest entries gain
+  `translations: [{lang, origin, stale, updated_at}]`; `GET /api/v1/federation/recipes/{id}`
+  returns the recipe plus `translations: [RecipeTranslation]`. Public recipes only, as today.
+- `node-server healthcheck [--port 8080]` subcommand (RN-63): one loopback GET of
+  `/api/v1/health` with a 2 s timeout, exit code 0 or 1. The image then needs no `curl`
+  or `wget`, and the check costs one short-lived process instead of a shell tool.
+- Container defaults: `NODE_HOST=0.0.0.0`, `NODE_PORT=8080`, `NODE_DATA_DIR=/data`,
+  `TOKIO_WORKER_THREADS=2` (set by the Compose template; Tokio otherwise starts one worker
+  per host vCPU in every container).
+- Model via gateway, environment only:
+  `LLM_MODEL=minimax/MiniMax-M3`,
+  `MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway:8080/anthropic`,
+  `MINIMAX_API_KEY=<hub token issued by the gateway>`.
+  rig already honours these variables; no client code changes.
+- Map gateway 429/402 to a clear `model_quota_exceeded` error (HTTP 429 from the hub) so
+  the UI can show "quota exhausted" instead of "model failure" (RN-67).
+- SSRF guard on every user-supplied URL fetch in `recipe-scraper` (RN-74, §6).
+- Magic-link login: `GET /api/v1/auth/magic?token=` and owner-only
+  `POST /api/v1/auth/magic-link` (RN-73, §4.6).
+- Streaming responses (`/mcp` SSE) carry `Cache-Control: no-cache` and
+  `X-Accel-Buffering: no` so neither Caddy nor Cloudflare buffers them (RN-64).
+- `GET /api/v1/export` (owner): zip with `recipes.db` (VACUUM INTO) and `images/`; and
+  `POST /api/v1/import/export` to restore into an empty node (RN-30).
+- Dockerfile (RN-63): multi-stage build, distroless (`gcr.io/distroless/cc` or `static`)
+  runtime, non-root user, `/data` volume, `HEALTHCHECK` through the binary's own
+  subcommand, image under 30 MB compressed.
+
+Per-hub environment file (`hubs/<name>/.env`):
+
+```
+NODE_API_KEY=…                 owner secret (generated)
+NODE_CHEF_NAME=Jacob
+NODE_AUTHOR_DID=did:key:…      optional
+NODE_PUBLIC_URL=https://jacob.chefslegacy.com
+NODE_MCP_ALLOWED_HOSTS=jacob.chefslegacy.com
+LLM_MODEL=minimax/MiniMax-M3
+MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway:8080/anthropic
+MINIMAX_API_KEY=…              hub token (gateway-issued), not the vendor key
+```
+
+### 5.2 llm-gateway (new crate `crates/llm-gateway`)
+Purpose: vendor key custody, quotas, cache, usage. Memory target under 30 MB.
+
+Endpoints (data plane, hub token in `x-api-key` or `Authorization: Bearer`):
+- `POST /anthropic/v1/messages`: Messages-format passthrough (MiniMax, Anthropic). `stream: true`
+  is forwarded without caching in v1 (or rejected with 501 if simpler).
+- `POST /openai/v1/chat/completions`: same for OpenAI-format vendors (phase 2).
+- `GET /health`.
+
+Admin API (`/admin/*`, `GATEWAY_ADMIN_TOKEN`):
+- `POST /admin/hubs {name, quota?}` → `{token}` (shown once); quota fields default to the
+  free tier below.
+- `PATCH /admin/hubs/{name}` (quota, status), `DELETE`, `POST /admin/hubs/{name}/byok {vendor, key}`.
+- `GET /admin/usage?hub=&from=&to=` → requests, tokens, cost per day.
+- `GET /admin/cache/stats`.
+
+Behaviour:
+- Vendor selection by path prefix; upstream base URL and key from gateway env
+  (`MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`, …). A hub with a BYOK key for that vendor uses
+  it instead and bypasses the platform budget (usage still recorded).
+- Quota, free tier (decided, §11): 30 requests per UTC day during the first 3 days after
+  the hub token was created (onboarding), then 10 per day, and at most 150 requests or
+  100 cents of estimated cost per calendar month. The effective daily limit is derived from
+  `hubs.created_at`; all four numbers are per-hub columns so an operator can raise them.
+  Token counters stay as a secondary cap (`daily_token_limit`). Over quota → 429 before any
+  upstream call. BYOK hubs skip the platform limits entirely.
+- Cache: key = SHA-256 of vendor, model and the **canonical JSON** of the request body:
+  object keys sorted recursively, no insignificant whitespace, numbers and strings as
+  serde_json emits them, and the hub's own credential excluded. Only when the body has
+  `temperature` 0 and no streaming; never cache non-2xx; TTL 30 days; response size cap
+  1 MB; LRU by `last_hit` when the table exceeds a configured size. Two hubs that send the
+  same content therefore hit the same entry even if their serializers differ (§4.3).
+- Concurrency: at most 2 in-flight upstream calls per hub; 120 s upstream timeout; one retry
+  with backoff on 5xx and on vendor 429.
+- Logging: hub, model, cache hit, tokens, latency, status. Prompt content only with
+  `GATEWAY_LOG_CONTENT=1`.
+
+Storage (`gateway.db`, SQLite):
+```
+hubs(id, name UNIQUE, token_hash, status, created_at,
+     onboarding_daily_requests DEFAULT 30, onboarding_days DEFAULT 3,
+     daily_request_limit DEFAULT 10, daily_token_limit,
+     monthly_request_limit DEFAULT 150, monthly_cost_cap_cents DEFAULT 100,
+     byok_json_enc)
+usage_daily(hub_id, day, requests, input_tokens, output_tokens, cost_cents, PRIMARY KEY(hub_id, day))
+cache(key_hash PRIMARY KEY, vendor, model, status, body BLOB, created_at, last_hit, hits)
+model_prices(vendor, model, input_cents_per_mtok, output_cents_per_mtok)
+```
+Tokens are stored hashed; BYOK keys encrypted with `GATEWAY_MASTER_KEY`.
+
+### 5.3 platform (new crate `crates/platform`)
+Purpose: apex site, registry, aggregator, signup, mail. Memory target under 128 MB.
+
+Public API and pages:
+- `GET /` landing and search page (dependency-free UI like the hub's, same design tokens
+  copied from a file in this repo, §11).
+- `GET /api/v1/search?q=&ingredient=&lang=&limit=&offset=` → hits with `hub`, `public_url`,
+  `recipe_id`, `title`, `tags`, `source_language`, `matched_lang`, `image_url`, `also_at[]`.
+  With `lang`, `title` and `tags` come from that language's federated translation when the
+  hub exposes one (`matched_lang = lang`), otherwise from the source row.
+- `GET /api/v1/hubs` → public directory (name, chef name, public recipe count).
+- `POST /api/v1/hubs/{name}/changed` (hub token) → poll that hub now.
+- `POST /api/v1/login-link {email}` (phase 3) → queues a "sign in to your hub" mail with a
+  magic link minted by the provisioner (§4.6); always answers 202.
+
+Admin API (`PLATFORM_ADMIN_TOKEN`): `POST/PATCH/DELETE /admin/hubs`, `POST /admin/poll`,
+`GET /admin/outbox`.
+
+Aggregator:
+- Poller every 10 minutes with jitter; per-hub backoff on failures; stores
+  `last_polled_at`, `last_ok_at`, `last_error`. Change detection uses the recipe's
+  `(updated_at, content_hash)` and each translation's `(lang, updated_at)` from the manifest.
+- Index tables:
+  ```
+  hubs(id, name UNIQUE, chef_name, internal_url, public_url, status, last_polled_at, last_ok_at, last_error)
+  recipes_index(hub_id, recipe_id, title, tags_json, canonical_json, language, content_hash,
+                updated_at, image_url, PRIMARY KEY(hub_id, recipe_id))
+  translations_index(hub_id, recipe_id, lang, title, tags_json, origin, stale, updated_at,
+                     PRIMARY KEY(hub_id, recipe_id, lang))
+  recipes_fts(hub_id UNINDEXED, recipe_id UNINDEXED, lang UNINDEXED, title, tags, canonical)
+      -- one row per (hub, recipe, lang): the source row plus one per federated translation
+  forks: view grouping recipes_index by content_hash
+  ```
+  Search runs the FTS query over all rows, keeps the best rank per `(hub, recipe)`, and
+  with `lang` prefers the row of that language for the returned title and tags.
+- Removal: a recipe missing from a manifest is deleted from the index on the next poll,
+  translations with it; a translation missing from an entry's list is deleted likewise.
+
+Mail outbox:
+- `mail_outbox(id, to_addr, template, vars_json, status, attempts, next_attempt_at,
+  provider_message_id, created_at)`, `suppressions(addr, reason)`.
+- Sender loop with exponential backoff (max 5 attempts); provider adapter trait with a
+  Resend implementation; per-recipient limit (5 per hour); templates: `verify_email`,
+  `hub_ready`, `login_link`, `key_rotated`.
+
+Phase 3 additions: `accounts(email, created_at)`, `magic_links(token_hash, email, expires_at)`
+(platform-side email verification; distinct from hub magic links), subdomain validation
+(`^[a-z0-9][a-z0-9-]{1,30}$`, reserved names), provisioner client over `control_net`.
+
+### 5.4 provisioner (phase 3, tiny privileged service)
+Runs with the Docker socket, joins `control_net` only (never `chefs_net`), admin token
+required. `POST /hubs {name, chef}` / `DELETE /hubs/{name}` / `POST /hubs/{name}/rotate-key`
+/ `POST /hubs/{name}/login-link → {url, expires_at}` execute the same steps as `hubctl`,
+reading `hubs/<name>/.env` on the host for the key. Keeping the socket and the keys out of
+`platform` limits the blast radius; hubs cannot reach it at all.
+
+### 5.5 Caddy
+caddy-docker-proxy image on `chefs_net`. Global: Origin CA certificate for
+`*.chefslegacy.com` and the apex; `trusted_proxies` set to Cloudflare ranges so
+`CF-Connecting-IP` becomes the client IP; request body limit 110 MB (Cloudflare's own cap is
+100 MB on the free plan); `flush_interval -1` on hub routes so SSE from `/mcp` streams
+through; access-log filter that deletes the `token` query parameter on
+`/api/v1/auth/magic`. Per hub, the labels in the template below; the apex route points at
+`platform`.
+
+### 5.6 hubctl (`deploy/hubctl`, Python, standard library)
+Commands: `create`, `remove [--purge]`, `list`, `rotate-key`, `login-link`, `backup`,
+`restore`, `upgrade [name|all]`, `status`. Idempotent; refuses names that are not valid
+subdomains or collide with reserved ones (`www`, `api`, `mail`, `admin`, `gateway`).
+
+Hub service template:
+
+```yaml
+hub-{{name}}:
+  image: ghcr.io/watchcat/chefsprodigy:{{version}}
+  env_file: hubs/{{name}}/.env
+  environment:
+    TOKIO_WORKER_THREADS: "2"
+  volumes: ["./hubs/{{name}}/data:/data"]
+  networks: [chefs_net]
+  labels:
+    caddy: {{name}}.chefslegacy.com
+    caddy.reverse_proxy: "{{upstreams 8080}}"
+    caddy.reverse_proxy.flush_interval: "-1"
+  mem_limit: 128m
+  cpus: "0.5"
+  read_only: true
+  tmpfs: ["/tmp"]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/node-server", "healthcheck"]
+    interval: 30s
+    timeout: 3s
+```
+
+## 6. Security
+
+- Only Caddy publishes ports; the VPS firewall admits 443 from Cloudflare ranges and 22 from
+  your addresses. Fail2ban on SSH.
+- Network isolation: `chefs_net` for Caddy, hubs, gateway and platform; `control_net` for
+  platform and provisioner only. No hub can open a connection to the provisioner.
+- SSRF guard (RN-74): everything in `recipe-scraper` that fetches a user-supplied URL
+  (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images) resolves the
+  hostname first and refuses loopback (`127.0.0.0/8`, `::1`), link-local including cloud
+  metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918 (`10/8`, `172.16/12`, `192.168/16`),
+  carrier-grade NAT (`100.64/10`), unique-local IPv6 (`fc00::/7`), multicast and
+  unspecified addresses, and any scheme other than `http`/`https`. Redirects are followed
+  manually (or through a redirect policy) so every hop is checked again, and the connection
+  is made to the resolved, checked address so DNS rebinding cannot swap it. A builder flag
+  (`allow_private_hosts`) exists only for tests with local servers. The model client is not
+  affected: it talks to the gateway address from configuration, not to user input.
+- Secrets: vendor keys only in the gateway's environment; each hub sees only its own owner
+  key and its gateway token; tokens hashed at rest; BYOK keys encrypted; backups uploaded
+  with an rclone `crypt` remote. The platform never holds `NODE_API_KEY`; magic links are
+  minted where the key lives (§4.6).
+- Magic links: HMAC over the owner key, 10-minute expiry, single use, delivered only to the
+  verified account email, token removed from the URL by the redirect, query stripped from
+  Caddy's access log.
+- Containers: non-root, read-only root filesystem, memory and CPU caps, no Docker socket
+  except the provisioner.
+- Abuse: Cloudflare rate-limit rule on `/api/v1/*` for anonymous traffic and a bot rule for
+  the apex search; Caddy rate limit as a second layer; the gateway's quotas bound model spend
+  even if a hub owner's key leaks.
+- Privacy: gateway logs metadata only by default; the aggregator indexes only what hubs mark
+  public (recipes and their translations alike); export archives belong to the owner.
+
+## 7. Capacity and limits
+
+- Hub idle memory is still unmeasured (RN-31). Planning assumption: 20–40 MB idle, 128 MB cap.
+  `TOKIO_WORKER_THREADS=2` keeps thread count and stack memory independent of the host's
+  core count. A 4 GB VPS therefore carries 20–30 hubs with headroom for the gateway and
+  platform; move to a second box or Fly machines beyond that.
+- CPU: photo normalization and WebP encoding are the heavy paths; the 0.5-core cap keeps a
+  burst from one hub off the others.
+- Cloudflare free plan: 100 MB request body. Multi-photo imports and Mealie archives can
+  exceed it; the UI should downscale photos client-side before upload (RN-72) and the docs
+  should point large Mealie imports at `hubctl restore` or a temporary DNS-only hostname.
+- MCP over Streamable HTTP goes through Cloudflare on the normal hostname (§11); the hub's
+  no-buffering headers and Caddy's `flush_interval -1` make the SSE stream pass unbuffered.
+  Verify once on the first hosted hub.
+
+## 8. Observability
+
+Container logs via `docker logs` (optionally Dozzle); Compose health checks through
+`node-server healthcheck`; gateway usage and cache stats via its admin API; platform
+`/admin/hubs` shows last poll per hub; an external uptime monitor on the apex and one hub.
+No metrics stack in v1.
+
+## 9. Rollout
+
+- **Phase 0, this week**: Dockerfile with the `healthcheck` subcommand and image
+  publishing; `NODE_PUBLIC_URL`, manifest `node_url` and translations in federation; SSRF
+  guard; `deploy/` with Compose (two networks), Caddy and `hubctl`; run
+  `watchcat.chefslegacy.com` as the first hub behind Cloudflare. Model calls still go
+  straight to MiniMax.
+- **Phase 1**: llm-gateway v1 (passthrough, tokens, quotas, usage, canonical cache); hubs
+  switch to it; seeded canonical terms; export endpoint and nightly backups; memory
+  measurement.
+- **Phase 2**: platform with registry, poller, index (recipes and translations) and search
+  page on the apex; `hubctl` registers hubs; optional change push from hubs.
+- **Phase 3**: signup with email verification, magic-link owner login, mail outbox,
+  provisioner, BYOK, client-side photo downscaling.
+
+## 10. Work breakdown
+
+| Story | Size | Scope | Acceptance |
+|---|---|---|---|
+| RN-63 Dockerfile, `healthcheck` subcommand, image publishing | S | multi-stage build, distroless, non-root, `/data`, `node-server healthcheck`, `HEALTHCHECK` through it, `TOKIO_WORKER_THREADS` documented, GitHub Actions to GHCR on tags | `docker run` reports healthy with no `curl` in the image; image < 30 MB compressed |
+| RN-64 `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers | S | config, manifest `node_url` and per-entry `translations`, `translations` on the federated recipe, MCP allowlist default, no-buffering headers on SSE | API tests: manifest lists a translation with its own `updated_at`; federated recipe carries it; allowlist derived from the URL |
+| RN-74 SSRF guard in `recipe-scraper` | S | §6: resolve and block private, loopback, link-local and metadata ranges, non-HTTP schemes, re-check every redirect hop; test-only `allow_private_hosts` | tests: `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a redirect to a private address are all refused; public URLs still import |
+| RN-65 `deploy/`: Compose, Caddy, hubctl, backup job | M | files in §3/§5.5/§5.6/§4.7 with the two networks and `login-link`, docs | `hubctl create demo` brings up a routed hub on a fresh box; `backup` lands in R2; MCP streams through Cloudflare |
+| RN-30 Backup and restore of the node | M | `GET /api/v1/export`, restore import | round trip preserves ids, hashes, covers and translations |
+| RN-66 llm-gateway v1: passthrough, tokens, usage | M | §5.2 without cache/quota | hub works unchanged against the gateway; usage rows recorded |
+| RN-67 Hub: quota-exceeded mapping | S | 429 passthrough with a readable message | API test |
+| RN-68 llm-gateway v2: quotas, canonical cache, admin API | M | §5.2 remainder incl. free-tier tiers and canonical JSON hashing | over-quota 429; the same request with reordered JSON keys is a cache hit; admin endpoints tested |
+| RN-75 Seeded `canonical_terms` dictionary | S | migration with ~200 everyday ingredients in `en`, `ru`, `nl`, `origin = 'human'` | fresh node labels `salt`/`garlic`/`onion` in all three languages with no model call; existing rows untouched |
+| RN-69 platform v1: registry, poller, index, search API | M | §5.3 without mail/signup, incl. `translations_index` and per-language FTS rows | two hubs indexed; a new translation on a hub appears after the next poll without a recipe change; fork grouping by hash; removal on next poll |
+| RN-70 platform search page | M | apex UI reusing hub design tokens | search in `ru` finds a Dutch recipe via its translation when the hub exposes it |
+| RN-71 mail outbox and Resend adapter | S | §5.3 outbox | retries and suppression tested with a fake provider |
+| RN-72 UI: client-side photo downscale | S | resize to 1600 px before upload | 6-photo import stays under 100 MB |
+| RN-73 signup, magic-link login, provisioner, BYOK | L | §4.6, §5.4: hub `auth/magic` + `auth/magic-link`, `hubctl login-link`, provisioner `login-link`, platform login-link mail | end-to-end: email → subdomain → running hub → signed in through the emailed link, key never rotated; expired and reused links are refused |
+| RN-31 Idle memory measurement | S | existing story, now required | number recorded; informs §7 |
+
+## 11. Decisions on former open questions
+
+1. **Design tokens**: the apex UI copies the hub's tokens from a file checked into this repo
+   (`frontend/dist/styles.css` tokens block extracted to `frontend/tokens.css` and included
+   by both). No npm, no CDN.
+2. **MCP through Cloudflare**: Streamable HTTP on `/mcp` goes through the proxied hostname.
+   The hub sends `Cache-Control: no-cache` and `X-Accel-Buffering: no` on SSE responses and
+   Caddy uses `flush_interval -1`. A separate DNS-only `mcp.<name>` hostname is added only if
+   buffering is actually observed.
+3. **Default free-tier quotas**: 30 model requests per day for the first 3 days after the hub
+   is created, then 10 per day, capped at 150 requests or 1.00 USD per month, unless the
+   owner configures BYOK in the gateway.
+4. **Retention**: backups live 30 days in R2 through a bucket lifecycle rule. A removed hub's
+   data stays on disk until `hubctl remove --purge`, after which only the R2 copies remain
+   and expire the same way.

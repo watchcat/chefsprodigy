@@ -16,6 +16,58 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
+### RN-63 · Dockerfile, `healthcheck` subcommand and image publishing (S)
+Per `docs/SPEC-hosted-platform.md` §5.1: multi-stage build, distroless runtime with no shell tools, non-root, `/data` volume; new `node-server healthcheck [--port]` subcommand that does one loopback GET of `/api/v1/health` (2 s timeout, exit 0/1) and is used by `HEALTHCHECK`; `TOKIO_WORKER_THREADS=2` documented for the container; GitHub Actions publishing `ghcr.io/watchcat/chefsprodigy` on tags.
+- Acceptance: `docker run` reports healthy with no `curl`/`wget` in the image; `node-server healthcheck` exits 1 when nothing listens; image under 30 MB compressed.
+
+### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
+`NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
+- Acceptance: API tests: manifest lists a translation with its own `updated_at` after `PUT /recipes/{id}/translations/ru` without the recipe's `updated_at` changing; federated recipe carries it; public recipes only; allowlist derived from the URL.
+
+### RN-74 · SSRF guard on user-supplied URL fetches (S)
+Harden `recipe-scraper` (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images, used by `ImportService::import_url`): resolve the hostname first and refuse loopback, link-local incl. cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918, CGNAT `100.64/10`, `fc00::/7`, multicast/unspecified addresses and any scheme other than `http`/`https`; re-check every redirect hop and connect to the checked address. A builder flag `allow_private_hosts` exists only for tests with local servers. Spec: `docs/SPEC-hosted-platform.md` §6.
+- Acceptance: tests show `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a public URL redirecting to a private address are refused with a clear error; public URLs still import; the model client is unaffected.
+
+### RN-65 · deploy/: Compose, Caddy, hubctl, backup job (M)
+Files described in the spec §3, §4.7, §5.5, §5.6 plus a deployment how-to for one VPS behind Cloudflare.
+- Acceptance: `hubctl create demo` brings up a routed hub on a fresh box; `hubctl backup demo` lands an archive in R2.
+
+### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
+New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
+- Acceptance: a hub works unchanged with `MINIMAX_ANTHROPIC_API_BASE` pointed at the gateway; usage recorded per hub.
+
+### RN-67 · Hub: model quota-exceeded mapping (S)
+Gateway 429/402 surfaces as a readable `model_quota_exceeded` error (HTTP 429) instead of a generic model failure.
+- Acceptance: API test with a fake extractor returning the gateway's error.
+
+### RN-68 · llm-gateway v2: quotas, cache, admin API (M)
+Daily/monthly quotas, deterministic-reply cache, admin endpoints and BYOK per spec §5.2.
+- Acceptance: over-quota request gets 429 before any upstream call; a repeated label request is a cache hit; admin API tested.
+
+### RN-75 · Seeded `canonical_terms` dictionary (S)
+SQLite migration inserting `en`, `ru`, `nl` labels for the ~200 most common everyday ingredients (`salt`, `garlic`, `onion`, `butter`, `egg`, `olive_oil`, …) with `origin = 'human'` via `INSERT OR IGNORE`, so hubs never spend model tokens on basic terms and the gateway cache is not relied on for them (spec §4.3).
+- Acceptance: a fresh node labels `salt`/`garlic`/`onion` in all three languages with no model call (fake extractor records zero `translate_terms` calls); rows that already exist are untouched.
+
+### RN-69 · platform v1: registry, poller, index, search API (M)
+New crate per spec §5.3 without mail and signup: hub registry, federation poller with backoff comparing `(updated_at, content_hash)` and each translation's `(lang, updated_at)`, `recipes_index` + `translations_index`, FTS with one row per `(hub, recipe, lang)`, fork grouping by content hash, `GET /api/v1/search?lang=` returning the matched language's title/tags and `matched_lang`.
+- Acceptance: two hubs indexed from manifests; a translation added on a hub appears in `ru` search after the next poll with no recipe change; forks grouped; recipes and translations removed on the next poll after unpublishing.
+
+### RN-70 · platform search page on the apex (M)
+Dependency-free UI reusing the hub's design tokens: search, hub directory, links to hubs.
+- Acceptance: a search in `ru` finds a Dutch recipe through its translation when the hub exposes it; works at 375 px.
+
+### RN-71 · Mail outbox and Resend adapter (S)
+Outbox table, sender loop with backoff, suppression list, provider trait with a Resend implementation and a fake for tests.
+- Acceptance: retries and suppression covered by tests with the fake provider.
+
+### RN-72 · UI: client-side photo downscale before upload (S)
+Resize photos to 1600 px in the browser before `POST /import/photo` so multi-photo imports stay under Cloudflare's 100 MB body cap.
+- Acceptance: six 12 MP photos upload under 100 MB total; server result unchanged.
+
+### RN-73 · Signup, magic-link owner login, provisioner, BYOK (L)
+Spec §4.6 and §5.4. Hub: `GET /api/v1/auth/magic?token=<expires>.<nonce>.<mac>` (HMAC-SHA256 over `NODE_API_KEY`, 10-minute validity, single use, sets `node_session`, redirects to `/#/`) and owner-only `POST /api/v1/auth/magic-link`; `hubctl login-link`. Platform: accounts, email verification via the outbox, subdomain choice, provisioner on `control_net` with the Docker socket exposing `create/remove/rotate-key/login-link`, "email me a sign-in link" for existing owners, hub-owner model keys stored in the gateway. `NODE_API_KEY` stays the master secret and is never rotated for login.
+- Acceptance: end to end on the VPS: email → subdomain → running hub → signed in through the emailed link with the key untouched; expired, tampered and reused links answer 401; MCP clients keep working throughout.
+
 ### RN-21 · Lossy WebP covers (S/M)
 Covers are lossless today (about 1 MB for a 1200 px image). Decide between a
 lower max width, a lossy encoder via `libwebp` bindings, or keeping lossless.
@@ -34,11 +86,11 @@ Federation endpoints are public by design but unthrottled.
 - Acceptance: tower-http rate limit on `/api/v1/federation/*`; documented in `docs/MCP_AND_API_SPEC.md`.
 
 ### RN-30 · Backup and restore of the node (M)
-Export the SQLite file plus images as a zip and import it back.
+Export the SQLite file plus images as a zip and import it back. Required for the hosted platform (spec §4.7): adds `GET /api/v1/export` used by the nightly backup job.
 - Acceptance: round trip preserves ids, hashes, and covers.
 
 ### RN-31 · Idle memory measurement in CI (S)
-The < 20 MB RSS goal has never been measured (sandbox blocked `ps`).
+The < 20 MB RSS goal has never been measured (sandbox blocked `ps`). Required for the hosted platform (spec §7): sets hub density per VPS.
 - Acceptance: a script in `scripts/` prints RSS after startup and 50 requests; number recorded in README.
 
 ---
@@ -56,6 +108,13 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-62 · UI: owner login and read-only mode for visitors (S)
+The PWA now checks `GET /api/v1/auth/me` before rendering a route, presents a native owner-key login dialog backed by `POST /api/v1/auth/login`, and offers `POST /api/v1/auth/logout`. Visitors see only public recipes and no create/edit/delete/import/translation-correction controls; direct write routes render an owner-access prompt, real `401` responses open the same login dialog, and the recipe detail explains that uncached display-language translations appear after the owner has viewed the recipe. Owner sessions use the existing HttpOnly cookie and survive reloads.
+- Verified in-browser 2026-10-24 via `scripts/devbuild.sh` against an isolated key-protected node: anonymous view contained only a public Dutch recipe, no write controls, a Russian cached-translation hint, and the protected `#/new` login prompt. After native-dialog sign-in, the session survived a reload, the owner saw the private recipe plus import/edit/delete controls, and logout restored public-only visitor mode.
+
+### RN-61 · Owner vs. public reader authentication on the REST API (M)
+`NODE_API_KEY` is the owner secret: `RequireOwner`/`OptionalOwner` extractors (bearer header or HttpOnly `node_session` cookie, constant-time compare), `POST /auth/login|logout`, `GET /auth/me`. Writes, cover upload, translation edits and all imports are owner-only (401); anonymous callers see public recipes only (listings, counts, shopping lists, 404 on private ids) and get cached translations/labels without live model calls. Without a key the node is single-user and warns at startup. 6 new tests.
 
 ### RN-60 · Backfill source language for existing recipes (S)
 Offline detector (`langdetect.rs`: Cyrillic letter signals for ru/uk, stopword scoring for en/nl/de/fr/es/it) applied at import time and by `backfill-language` (CLI + background pass at `serve` startup); the model is asked only when the heuristic is unsure; backfill never touches `updated_at`/`content_hash`. 7 new tests.

@@ -16,6 +16,7 @@ The files are embedded into the Rust binary at build time by `rust-embed`
 scripts/devbuild.sh              # builds, starts http://127.0.0.1:8080, opens the browser
 scripts/devbuild.sh --fresh      # same, but wipes ./data and seeds examples/sample-recipe.json
 node --check frontend/dist/app.js
+python3 scripts/i18n-check.py    # bundle parity and no hard-coded UI strings
 cargo test --workspace           # API behaviour the UI relies on is covered here
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -33,7 +34,8 @@ Full spec: `docs/MCP_AND_API_SPEC.md`. Quick map:
 | import | `POST /import/url {url,is_public}`, `POST /import/text {text,origin_url,is_public}`, `POST /import/mealie-backup` (multipart `file`), `POST /import/photo` (multipart `photos` ×1–6 + `is_public` text; 422 = no recipe found, 503 = model cannot see images) |
 | covers | `image_path` is relative, e.g. `images/<id>.webp`, served at `/images/<id>.webp`; upload with `PUT /recipes/{id}/image` (multipart `file`) |
 | shopping list | `POST /shopping-list?lang=ru {items:[{recipe_id,servings}], pantry_exclude_canonical_ids:[]}` → `{basic_groceries, specialty_items, missing_recipes}`; with `lang` each line has `canonical_label` |
-| errors | always JSON `{"error": "..."}` with 400/404/502/503; render the message |
+| auth | `POST /auth/login {api_key}` sets the `node_session` cookie; `POST /auth/logout`; `GET /auth/me` → `{authenticated}`. Writes, imports and live translations need the owner; anonymous visitors see public recipes only and cached translations only. Without `NODE_API_KEY` everyone is the owner. Show a login affordance when `/auth/me` is false and hide write actions |
+| errors | always JSON `{"error": "..."}` with 400/401/404/502/503; render the message |
 
 Payload shape for create/update: `examples/sample-recipe.json`. Units are exactly
 `g`, `ml`, `pcs`, `to_taste`; `metric_amount` is `null` for `to_taste`.
@@ -49,8 +51,12 @@ Payload shape for create/update: `examples/sample-recipe.json`. Units are exactl
 - Mobile first: everything must work at 375 px with no horizontal scroll.
 - The service worker caches only the static shell; bump `CACHE_NAME` in `sw.js` when
   you add or rename a static file, and add it to `APP_SHELL`.
-- Text in the UI is English; recipes themselves can be any language (imports have
-  produced Russian recipes), so never assume ASCII.
+- The UI is multilingual (`docs/SPEC-i18n.md`, RN-58/RN-59): every user-visible string
+  goes through `t(key)` and lives in `frontend/dist/i18n/{en,ru,nl}.json`. Add new keys to
+  all three bundles (English is the fallback) and run `python3 scripts/i18n-check.py`
+  before finishing a story. The header switcher persists `localStorage["ui.lang"]` and
+  sets `<html lang>`; send that language as `lang` on content requests so titles, tags and
+  labels arrive translated. Recipes themselves can be any language, so never assume ASCII.
 
 ## Verifying a story
 Start the node, exercise the feature in a real browser, and check the server log in the
