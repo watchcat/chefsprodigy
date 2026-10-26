@@ -22,9 +22,10 @@ fn unit_factor(word: &str) -> Option<(MeasurementUnit, f32)> {
         "tbsp" | "tbs" | "tablespoon" | "tablespoons" => (Ml, 15.0),
         "tsp" | "teaspoon" | "teaspoons" => (Ml, 5.0),
         "fl" => (Ml, 29.57),
-        "clove" | "cloves" | "piece" | "pieces" | "pcs" | "pc" | "slice" | "slices" | "can" | "cans" | "stick"
-        | "sticks" | "bunch" | "bunches" | "sprig" | "sprigs" | "stalk" | "stalks" | "head" | "heads" | "sheet"
-        | "sheets" | "leaf" | "leaves" | "fillet" | "fillets" | "egg" | "whole" | "large" | "medium" | "small" => (Pcs, 1.0),
+        "clove" | "cloves" | "piece" | "pieces" | "pcs" | "pc" | "slice" | "slices" | "can"
+        | "cans" | "stick" | "sticks" | "bunch" | "bunches" | "sprig" | "sprigs" | "stalk"
+        | "stalks" | "head" | "heads" | "sheet" | "sheets" | "leaf" | "leaves" | "fillet"
+        | "fillets" | "egg" | "whole" | "large" | "medium" | "small" => (Pcs, 1.0),
         "pinch" | "pinches" | "dash" | "dashes" | "handful" | "splash" => (ToTaste, 0.0),
         _ => return None,
     })
@@ -32,11 +33,62 @@ fn unit_factor(word: &str) -> Option<(MeasurementUnit, f32)> {
 
 /// Words that describe preparation or size rather than the ingredient itself.
 const STOPWORDS: &[&str] = &[
-    "a", "an", "the", "of", "to", "taste", "fresh", "freshly", "chopped", "minced", "diced", "sliced", "finely",
-    "roughly", "coarsely", "thinly", "peeled", "grated", "crushed", "optional", "plus", "extra", "more", "for",
-    "serving", "garnish", "large", "medium", "small", "about", "approximately", "or", "and", "as", "needed",
-    "divided", "room", "temperature", "softened", "melted", "cold", "warm", "hot", "ripe", "raw", "cooked", "dried",
-    "pinch", "pinches", "dash", "handful", "splash", "piece", "pieces", "pcs", "ground",
+    "a",
+    "an",
+    "the",
+    "of",
+    "to",
+    "taste",
+    "fresh",
+    "freshly",
+    "chopped",
+    "minced",
+    "diced",
+    "sliced",
+    "finely",
+    "roughly",
+    "coarsely",
+    "thinly",
+    "peeled",
+    "grated",
+    "crushed",
+    "optional",
+    "plus",
+    "extra",
+    "more",
+    "for",
+    "serving",
+    "garnish",
+    "large",
+    "medium",
+    "small",
+    "about",
+    "approximately",
+    "or",
+    "and",
+    "as",
+    "needed",
+    "divided",
+    "room",
+    "temperature",
+    "softened",
+    "melted",
+    "cold",
+    "warm",
+    "hot",
+    "ripe",
+    "raw",
+    "cooked",
+    "dried",
+    "pinch",
+    "pinches",
+    "dash",
+    "handful",
+    "splash",
+    "piece",
+    "pieces",
+    "pcs",
+    "ground",
 ];
 
 fn unicode_fraction(c: char) -> Option<f32> {
@@ -81,11 +133,19 @@ fn parse_number(tok: &str) -> Option<f32> {
 fn split_attached_unit(tok: &str) -> Option<(&str, &str)> {
     let idx = tok.find(|c: char| c.is_alphabetic())?;
     let (num, unit) = tok.split_at(idx);
-    (!num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',' || c == '/')).then_some((num, unit))
+    (!num.is_empty()
+        && num
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ',' || c == '/'))
+    .then_some((num, unit))
 }
 
 fn round_amount(a: f32) -> f32 {
-    if a >= 10.0 { a.round() } else { (a * 100.0).round() / 100.0 }
+    if a >= 10.0 {
+        a.round()
+    } else {
+        (a * 100.0).round() / 100.0
+    }
 }
 
 /// Build a snake_case canonical id from the ingredient name words.
@@ -94,12 +154,24 @@ fn canonical_from_words(words: &[String]) -> String {
         .iter()
         .map(|w| w.to_lowercase())
         .filter(|w| !STOPWORDS.contains(&w.as_str()))
-        .map(|w| w.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect::<String>())
+        .map(|w| {
+            w.chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        })
         .filter(|w| !w.trim_matches('_').is_empty())
         .collect::<Vec<_>>()
         .join("_");
-    let id = id.split('_').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("_");
-    if id.is_empty() { "unknown".to_string() } else { id }
+    let id = id
+        .split('_')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if id.is_empty() {
+        "unknown".to_string()
+    } else {
+        id
+    }
 }
 
 /// Normalize a single raw ingredient line without any LLM.
@@ -118,7 +190,10 @@ pub fn heuristic_ingredient(raw: &str) -> IngredientItem {
         }
     }
     let name_part = name_part.split([',', ';']).next().unwrap_or("").to_string();
-    let lowered = name_part.to_lowercase().replace("freshly ground", "").replace("to taste", "");
+    let lowered = name_part
+        .to_lowercase()
+        .replace("freshly ground", "")
+        .replace("to taste", "");
 
     let mut tokens = lowered.split_whitespace().peekable();
     let mut quantity: Option<f32> = None;
@@ -129,7 +204,9 @@ pub fn heuristic_ingredient(raw: &str) -> IngredientItem {
         if let Some(n) = parse_number(tok) {
             quantity = Some(quantity.unwrap_or(0.0) + n);
             tokens.next();
-        } else if let Some((num, unit)) = split_attached_unit(tok).filter(|(_, u)| unit_factor(u).is_some()) {
+        } else if let Some((num, unit)) =
+            split_attached_unit(tok).filter(|(_, u)| unit_factor(u).is_some())
+        {
             if let Some(n) = parse_number(num) {
                 quantity = Some(quantity.unwrap_or(0.0) + n);
                 pending_unit = Some(unit.to_string());
@@ -146,9 +223,12 @@ pub fn heuristic_ingredient(raw: &str) -> IngredientItem {
     let mut amount = None;
 
     let unit_word = pending_unit.or_else(|| {
-        rest.first().filter(|w| unit_factor(w).is_some()).cloned().inspect(|_| {
-            rest.remove(0);
-        })
+        rest.first()
+            .filter(|w| unit_factor(w).is_some())
+            .cloned()
+            .inspect(|_| {
+                rest.remove(0);
+            })
     });
     // "fl oz" -> drop the trailing "oz"
     if unit_word.as_deref() == Some("fl") && rest.first().map(|w| w == "oz").unwrap_or(false) {

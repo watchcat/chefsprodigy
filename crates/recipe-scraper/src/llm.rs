@@ -14,8 +14,8 @@ use rig_core::message::{DocumentSourceKind, Image, ImageMediaType, UserContent};
 use rig_core::operation::Completion;
 use rig_core::providers::registry::ConnectOptions;
 use schemars::{JsonSchema, schema_for};
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::ScraperError;
 use crate::images::NormalizedPhoto;
@@ -159,16 +159,21 @@ fn snake_case(s: &str) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect::<String>();
-    id.split('_').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("_")
+    id.split('_')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
 }
-
 
 // ---- lenient scalar deserializers: models send "3–4", "15 minutes", "0,5", "Grams" ...
 
 fn first_number(s: &str) -> Option<f32> {
     let cleaned = s.replace(',', ".");
     let start = cleaned.find(|c: char| c.is_ascii_digit())?;
-    let end = cleaned[start..].find(|c: char| !(c.is_ascii_digit() || c == '.')).map(|e| start + e).unwrap_or(cleaned.len());
+    let end = cleaned[start..]
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .map(|e| start + e)
+        .unwrap_or(cleaned.len());
     cleaned[start..end].trim_end_matches('.').parse().ok()
 }
 
@@ -181,13 +186,17 @@ fn de_f32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Erro
 }
 
 fn de_u8<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
-    Ok(de_f32(d)?.filter(|v| *v > 0.0).and_then(|v| u8::try_from(v.round() as i64).ok()))
+    Ok(de_f32(d)?
+        .filter(|v| *v > 0.0)
+        .and_then(|v| u8::try_from(v.round() as i64).ok()))
 }
 
 fn de_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
     Ok(match Option::<serde_json::Value>::deserialize(d)? {
         Some(serde_json::Value::Number(n)) => n.as_f64().map(|v| v.round() as u32),
-        Some(serde_json::Value::String(s)) => first_number(&s).map(|v| v.round() as u32).or_else(|| crate::importer::extract_timer_seconds(&s)),
+        Some(serde_json::Value::String(s)) => first_number(&s)
+            .map(|v| v.round() as u32)
+            .or_else(|| crate::importer::extract_timer_seconds(&s)),
         _ => None,
     })
 }
@@ -195,7 +204,9 @@ fn de_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Erro
 /// Minutes from a number, a seconds field, or a phrase like "1 hour 10 min".
 fn de_minutes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
     Ok(match Option::<serde_json::Value>::deserialize(d)? {
-        Some(serde_json::Value::Number(n)) => n.as_f64().and_then(|v| u16::try_from(v.round() as i64).ok()),
+        Some(serde_json::Value::Number(n)) => n
+            .as_f64()
+            .and_then(|v| u16::try_from(v.round() as i64).ok()),
         Some(serde_json::Value::String(s)) => crate::mealie::human_duration_minutes(&s)
             .or_else(|| first_number(&s).and_then(|v| u16::try_from(v.round() as i64).ok())),
         _ => None,
@@ -203,7 +214,9 @@ fn de_minutes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::
 }
 
 fn de_seconds_as_minutes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
-    Ok(de_u32(d)?.map(|secs| secs.div_ceil(60)).and_then(|m| u16::try_from(m).ok()))
+    Ok(de_u32(d)?
+        .map(|secs| secs.div_ceil(60))
+        .and_then(|m| u16::try_from(m).ok()))
 }
 
 fn de_unit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<MeasurementUnit>, D::Error> {
@@ -212,8 +225,12 @@ fn de_unit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<MeasurementU
         let u = u.trim().to_lowercase().replace([' ', '-'], "_");
         match u.as_str() {
             "g" | "gram" | "grams" | "gr" => Some(MeasurementUnit::G),
-            "ml" | "milliliter" | "milliliters" | "millilitre" | "millilitres" => Some(MeasurementUnit::Ml),
-            "pcs" | "pc" | "piece" | "pieces" | "count" | "whole" | "unit" | "units" => Some(MeasurementUnit::Pcs),
+            "ml" | "milliliter" | "milliliters" | "millilitre" | "millilitres" => {
+                Some(MeasurementUnit::Ml)
+            }
+            "pcs" | "pc" | "piece" | "pieces" | "count" | "whole" | "unit" | "units" => {
+                Some(MeasurementUnit::Pcs)
+            }
             "to_taste" | "totaste" | "pinch" | "none" | "" => Some(MeasurementUnit::ToTaste),
             _ => None, // e.g. "tbsp": resolved from raw_text by the caller
         }
@@ -222,16 +239,35 @@ fn de_unit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<MeasurementU
 
 #[derive(Debug, Default, Deserialize)]
 struct WireIngredient {
-    #[serde(default, alias = "text", alias = "name", alias = "original", alias = "original_text", alias = "line")]
+    #[serde(
+        default,
+        alias = "text",
+        alias = "name",
+        alias = "original",
+        alias = "original_text",
+        alias = "line"
+    )]
     raw_text: Option<String>,
-    #[serde(default, alias = "amount", alias = "quantity", alias = "metric_quantity", deserialize_with = "de_f32")]
+    #[serde(
+        default,
+        alias = "amount",
+        alias = "quantity",
+        alias = "metric_quantity",
+        deserialize_with = "de_f32"
+    )]
     metric_amount: Option<f32>,
     #[serde(default, alias = "metric_unit", deserialize_with = "de_unit")]
     unit: Option<MeasurementUnit>,
     /// Set when the model's unit was not one of ours (e.g. "tbsp"); resolved from raw_text.
     #[serde(skip)]
     _unused: (),
-    #[serde(default, alias = "canonical", alias = "id", alias = "ingredient", alias = "ingredient_id")]
+    #[serde(
+        default,
+        alias = "canonical",
+        alias = "id",
+        alias = "ingredient",
+        alias = "ingredient_id"
+    )]
     canonical_id: Option<String>,
     #[serde(default, alias = "specialty")]
     is_specialty: bool,
@@ -244,26 +280,50 @@ impl WireIngredient {
             .as_deref()
             .map(snake_case)
             .filter(|c| !c.is_empty())
-            .or_else(|| self.raw_text.as_deref().map(|r| heuristic_ingredient(r).canonical_id))?;
-        let (metric_amount, unit) = match (self.unit, self.metric_amount, self.raw_text.as_deref()) {
+            .or_else(|| {
+                self.raw_text
+                    .as_deref()
+                    .map(|r| heuristic_ingredient(r).canonical_id)
+            })?;
+        let (metric_amount, unit) = match (self.unit, self.metric_amount, self.raw_text.as_deref())
+        {
             (Some(u), amount, _) => (amount, u),
             // No usable unit from the model: let the heuristic parser read the original wording.
             (None, _, Some(raw)) if raw.trim().chars().any(|c| c.is_ascii_digit()) => {
                 let h = heuristic_ingredient(raw);
-                if h.metric_amount.is_some() { (h.metric_amount, h.unit) } else { (self.metric_amount, MeasurementUnit::Pcs) }
+                if h.metric_amount.is_some() {
+                    (h.metric_amount, h.unit)
+                } else {
+                    (self.metric_amount, MeasurementUnit::Pcs)
+                }
             }
             (None, Some(a), _) => (Some(a), MeasurementUnit::Pcs),
             (None, None, _) => (None, MeasurementUnit::ToTaste),
         };
-        let metric_amount = if unit == MeasurementUnit::ToTaste { None } else { metric_amount };
-        let raw_text = self.raw_text.map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).unwrap_or_else(|| {
-            let name = canonical_id.replace('_', " ");
-            match metric_amount {
-                Some(a) => format!("{a} {} {name}", unit.as_str()),
-                None => name,
-            }
-        });
-        Some(IngredientItem { raw_text, metric_amount, unit, canonical_id, is_specialty: self.is_specialty, canonical_label: None })
+        let metric_amount = if unit == MeasurementUnit::ToTaste {
+            None
+        } else {
+            metric_amount
+        };
+        let raw_text = self
+            .raw_text
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| {
+                let name = canonical_id.replace('_', " ");
+                match metric_amount {
+                    Some(a) => format!("{a} {} {name}", unit.as_str()),
+                    None => name,
+                }
+            });
+        Some(IngredientItem {
+            raw_text,
+            metric_amount,
+            unit,
+            canonical_id,
+            is_specialty: self.is_specialty,
+            canonical_label: None,
+        })
     }
 }
 
@@ -272,26 +332,60 @@ impl WireIngredient {
 enum WireStep {
     Text(String),
     Step {
-        #[serde(default, alias = "number", alias = "step", alias = "index", deserialize_with = "de_u32")]
+        #[serde(
+            default,
+            alias = "number",
+            alias = "step",
+            alias = "index",
+            deserialize_with = "de_u32"
+        )]
         step_number: Option<u32>,
         #[serde(default, alias = "instruction", alias = "description")]
         text: String,
-        #[serde(default, alias = "timer", alias = "duration_seconds", deserialize_with = "de_u32")]
+        #[serde(
+            default,
+            alias = "timer",
+            alias = "duration_seconds",
+            deserialize_with = "de_u32"
+        )]
         timer_seconds: Option<u32>,
     },
 }
 
 #[derive(Debug, Deserialize)]
 struct WireRecipe {
-    #[serde(default, alias = "name", alias = "recipe_name", alias = "recipe_title", alias = "dish", alias = "heading")]
+    #[serde(
+        default,
+        alias = "name",
+        alias = "recipe_name",
+        alias = "recipe_title",
+        alias = "dish",
+        alias = "heading"
+    )]
     title: Option<String>,
     #[serde(default)]
     description: Option<String>,
-    #[serde(default, alias = "yield", alias = "serves", alias = "portions", deserialize_with = "de_u8")]
+    #[serde(
+        default,
+        alias = "yield",
+        alias = "serves",
+        alias = "portions",
+        deserialize_with = "de_u8"
+    )]
     servings: Option<u8>,
-    #[serde(default, alias = "prep_time", alias = "prep_minutes", deserialize_with = "de_minutes")]
+    #[serde(
+        default,
+        alias = "prep_time",
+        alias = "prep_minutes",
+        deserialize_with = "de_minutes"
+    )]
     prep_time_minutes: Option<u16>,
-    #[serde(default, alias = "cook_time", alias = "cook_minutes", deserialize_with = "de_minutes")]
+    #[serde(
+        default,
+        alias = "cook_time",
+        alias = "cook_minutes",
+        deserialize_with = "de_minutes"
+    )]
     cook_time_minutes: Option<u16>,
     #[serde(default, alias = "total_time", deserialize_with = "de_minutes")]
     total_time_minutes: Option<u16>,
@@ -307,7 +401,13 @@ struct WireRecipe {
     instructions: Vec<WireStep>,
     #[serde(default)]
     tags: Vec<String>,
-    #[serde(default, alias = "lang", alias = "source_language", alias = "recipe_language", alias = "original_language")]
+    #[serde(
+        default,
+        alias = "lang",
+        alias = "source_language",
+        alias = "recipe_language",
+        alias = "original_language"
+    )]
     language: Option<String>,
 }
 
@@ -326,7 +426,9 @@ pub fn parse_recipe_reply(text: &str) -> Result<ExtractedRecipeDraft, ScraperErr
 }
 
 /// Lenient conversion of an already-parsed JSON value into a draft.
-pub fn recipe_from_value(mut value: serde_json::Value) -> Result<ExtractedRecipeDraft, ScraperError> {
+pub fn recipe_from_value(
+    mut value: serde_json::Value,
+) -> Result<ExtractedRecipeDraft, ScraperError> {
     // Unwrap {"recipe": {...}}, {"data": {...}} style envelopes.
     for _ in 0..3 {
         let inner = ["recipe", "data", "result", "output", "extracted"]
@@ -337,8 +439,12 @@ pub fn recipe_from_value(mut value: serde_json::Value) -> Result<ExtractedRecipe
             None => break,
         }
     }
-    if value.get("properties").is_some() && value.get("type").and_then(|t| t.as_str()) == Some("object") {
-        return Err(ScraperError::Llm("model echoed the JSON schema instead of filling it".to_string()));
+    if value.get("properties").is_some()
+        && value.get("type").and_then(|t| t.as_str()) == Some("object")
+    {
+        return Err(ScraperError::Llm(
+            "model echoed the JSON schema instead of filling it".to_string(),
+        ));
     }
     hoist_times(&mut value);
     let wire: WireRecipe = serde_json::from_value(value)
@@ -349,23 +455,37 @@ pub fn recipe_from_value(mut value: serde_json::Value) -> Result<ExtractedRecipe
         .filter_map(WireIngredient::into_item)
         .filter(|i| !is_equipment(&i.canonical_id))
         .collect();
-    let title = match wire.title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+    let title = match wire
+        .title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    {
         Some(t) => t,
         // Recipe cards often carry the title on the other side: name the dish by its ingredients.
         None if !ingredients.is_empty() => synthesized_title(&ingredients),
-        None => return Err(ScraperError::Llm("model reply has no recipe title".to_string())),
+        None => {
+            return Err(ScraperError::Llm(
+                "model reply has no recipe title".to_string(),
+            ));
+        }
     };
     let instructions = wire
         .instructions
         .into_iter()
         .map(|s| match s {
             WireStep::Text(text) => (text, None, None),
-            WireStep::Step { step_number, text, timer_seconds } => (text, step_number, timer_seconds),
+            WireStep::Step {
+                step_number,
+                text,
+                timer_seconds,
+            } => (text, step_number, timer_seconds),
         })
         .filter(|(text, _, _)| !text.trim().is_empty())
         .enumerate()
         .map(|(i, (text, number, timer))| InstructionStep {
-            step_number: number.and_then(|n| u16::try_from(n).ok()).unwrap_or((i + 1) as u16),
+            step_number: number
+                .and_then(|n| u16::try_from(n).ok())
+                .unwrap_or((i + 1) as u16),
             text: text.trim().to_string(),
             timer_seconds: timer,
         })
@@ -384,14 +504,19 @@ pub fn recipe_from_value(mut value: serde_json::Value) -> Result<ExtractedRecipe
         ingredients,
         instructions,
         tags: wire.tags,
-        language: wire.language.as_deref().and_then(recipe_core::normalize_lang),
+        language: wire
+            .language
+            .as_deref()
+            .and_then(recipe_core::normalize_lang),
     })
 }
 
 /// Move `{"times": {"prep_seconds": ..}}` / `{"time": {..}}` entries to the top level
 /// where the lenient field aliases can see them.
 fn hoist_times(value: &mut serde_json::Value) {
-    let Some(obj) = value.as_object_mut() else { return };
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
     let nested = ["times", "time", "timing", "durations"]
         .iter()
         .find_map(|k| obj.remove(*k))
@@ -413,9 +538,35 @@ fn hoist_times(value: &mut serde_json::Value) {
 
 /// Kitchen tools that models sometimes list among ingredients.
 const EQUIPMENT_WORDS: &[&str] = &[
-    "grater", "kettle", "colander", "skillet", "saucepan", "frying_pan", "pan", "pot", "lid", "whisk", "blender", "mixer",
-    "sieve", "strainer", "peeler", "tongs", "spatula", "ladle", "oven", "microwave", "knife", "board", "jug", "scale",
-    "thermometer", "foil", "parchment", "skewer", "skewers",
+    "grater",
+    "kettle",
+    "colander",
+    "skillet",
+    "saucepan",
+    "frying_pan",
+    "pan",
+    "pot",
+    "lid",
+    "whisk",
+    "blender",
+    "mixer",
+    "sieve",
+    "strainer",
+    "peeler",
+    "tongs",
+    "spatula",
+    "ladle",
+    "oven",
+    "microwave",
+    "knife",
+    "board",
+    "jug",
+    "scale",
+    "thermometer",
+    "foil",
+    "parchment",
+    "skewer",
+    "skewers",
 ];
 
 fn is_equipment(canonical_id: &str) -> bool {
@@ -424,8 +575,11 @@ fn is_equipment(canonical_id: &str) -> bool {
     // ("large_skillet", "medium_saucepan_with_lid"); food names like "panko" or
     // "nori_sheet" do not end in a tool word.
     let last = tokens.last().copied().unwrap_or("");
-    let has_tool_phrase = canonical_id.contains("frying_pan") || canonical_id.contains("measuring_");
-    has_tool_phrase || EQUIPMENT_WORDS.contains(&last) || tokens.windows(2).any(|w| w == ["with", "lid"])
+    let has_tool_phrase =
+        canonical_id.contains("frying_pan") || canonical_id.contains("measuring_");
+    has_tool_phrase
+        || EQUIPMENT_WORDS.contains(&last)
+        || tokens.windows(2).any(|w| w == ["with", "lid"])
 }
 
 /// "Torchiette, parma ham slices & cherry tomato" from the first three ingredients.
@@ -433,7 +587,11 @@ fn synthesized_title(ingredients: &[IngredientItem]) -> String {
     let names: Vec<String> = ingredients
         .iter()
         .filter(|i| i.unit != MeasurementUnit::ToTaste)
-        .chain(ingredients.iter().filter(|i| i.unit == MeasurementUnit::ToTaste))
+        .chain(
+            ingredients
+                .iter()
+                .filter(|i| i.unit == MeasurementUnit::ToTaste),
+        )
         .map(|i| i.canonical_id.replace('_', " "))
         .take(3)
         .collect();
@@ -451,16 +609,32 @@ fn synthesized_title(ingredients: &[IngredientItem]) -> String {
 /// Whether a model note describes a photograph of the finished dish.
 fn mentions_dish_photo(notes: &str) -> bool {
     let n = notes.to_lowercase();
-    ["dish photo", "photo of the dish", "photograph of the dish", "dish photograph", "plated dish", "finished dish", "food photo", "hero image", "hero photo", "photo of the finished", "picture of the dish"]
-        .iter()
-        .any(|k| n.contains(k))
+    [
+        "dish photo",
+        "photo of the dish",
+        "photograph of the dish",
+        "dish photograph",
+        "plated dish",
+        "finished dish",
+        "food photo",
+        "hero image",
+        "hero photo",
+        "photo of the finished",
+        "picture of the dish",
+    ]
+    .iter()
+    .any(|k| n.contains(k))
 }
 
 fn photo_kind_from_str(s: &str) -> PhotoKind {
     match s.trim().to_lowercase().replace(['-', ' '], "_").as_str() {
-        "recipe_text" | "text" | "recipe" | "page" | "card" | "handwritten" => PhotoKind::RecipeText,
+        "recipe_text" | "text" | "recipe" | "page" | "card" | "handwritten" => {
+            PhotoKind::RecipeText
+        }
         "dish" | "food" | "plate" | "meal" | "dish_photo" | "finished_dish" => PhotoKind::Dish,
-        "both" | "mixed" | "dish_and_text" | "text_and_dish" | "cover" | "front" | "card_front" => PhotoKind::Both,
+        "both" | "mixed" | "dish_and_text" | "text_and_dish" | "cover" | "front" | "card_front" => {
+            PhotoKind::Both
+        }
         _ => PhotoKind::Unrelated,
     }
 }
@@ -476,18 +650,41 @@ pub fn parse_photo_reply(text: &str) -> Result<PhotoExtraction, ScraperError> {
             arr.iter()
                 .enumerate()
                 .map(|(i, p)| {
-                    let notes = p.get("notes").and_then(|v| v.as_str()).map(str::to_string).filter(|n| !n.is_empty());
-                    let kind = ["kind", "classification", "type", "category", "label", "content"]
-                        .iter()
-                        .find_map(|k| p.get(*k).and_then(|v| v.as_str()))
-                        .map(photo_kind_from_str)
-                        .unwrap_or(PhotoKind::Unrelated);
+                    let notes = p
+                        .get("notes")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .filter(|n| !n.is_empty());
+                    let kind = [
+                        "kind",
+                        "classification",
+                        "type",
+                        "category",
+                        "label",
+                        "content",
+                    ]
+                    .iter()
+                    .find_map(|k| p.get(*k).and_then(|v| v.as_str()))
+                    .map(photo_kind_from_str)
+                    .unwrap_or(PhotoKind::Unrelated);
                     // Models often file a card front as "text" while describing its hero photo.
                     let kind = match kind {
-                        PhotoKind::RecipeText | PhotoKind::Unrelated if notes.as_deref().is_some_and(mentions_dish_photo) => PhotoKind::Both,
+                        PhotoKind::RecipeText | PhotoKind::Unrelated
+                            if notes.as_deref().is_some_and(mentions_dish_photo) =>
+                        {
+                            PhotoKind::Both
+                        }
                         k => k,
                     };
-                    PhotoInfo { index: p.get("index").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(i), kind, notes }
+                    PhotoInfo {
+                        index: p
+                            .get("index")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(i),
+                        kind,
+                        notes,
+                    }
                 })
                 .collect()
         })
@@ -495,9 +692,17 @@ pub fn parse_photo_reply(text: &str) -> Result<PhotoExtraction, ScraperError> {
     let unreadable: Vec<String> = value
         .get("unreadable")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
-    let language = value.get("language").and_then(|v| v.as_str()).map(str::to_string).filter(|l| !l.is_empty());
+    let language = value
+        .get("language")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|l| !l.is_empty());
 
     let recipe_value = match value.get("recipe") {
         Some(r) if r.is_object() => r.clone(),
@@ -506,17 +711,28 @@ pub fn parse_photo_reply(text: &str) -> Result<PhotoExtraction, ScraperError> {
     };
     let explanation = || {
         let notes: Vec<String> = photos.iter().filter_map(|p| p.notes.clone()).collect();
-        if notes.is_empty() { "the photos do not contain a readable recipe".to_string() } else { notes.join("; ") }
+        if notes.is_empty() {
+            "the photos do not contain a readable recipe".to_string()
+        } else {
+            notes.join("; ")
+        }
     };
     if recipe_value.is_null() {
         return Err(ScraperError::NoRecipeInPhotos(explanation()));
     }
     let recipe = match recipe_from_value(recipe_value) {
         Ok(r) => r,
-        Err(ScraperError::Llm(m)) if m.contains("no recipe title") => return Err(ScraperError::NoRecipeInPhotos(explanation())),
+        Err(ScraperError::Llm(m)) if m.contains("no recipe title") => {
+            return Err(ScraperError::NoRecipeInPhotos(explanation()));
+        }
         Err(e) => return Err(e),
     };
-    Ok(PhotoExtraction { recipe, photos, unreadable, language })
+    Ok(PhotoExtraction {
+        recipe,
+        photos,
+        unreadable,
+        language,
+    })
 }
 
 const TRANSLATE_PREAMBLE: &str = "You translate recipes for home cooks. Translate every string in the request into the \
@@ -547,7 +763,10 @@ give the natural short name a shopper in the target language would use (e.g. gar
 
 /// Parse a term-label reply: `{"labels": {id: label}}`, a bare map, or an
 /// array of `{canonical_id|id, label}` objects. Unknown ids are dropped.
-pub fn parse_term_labels(text: &str, ids: &[String]) -> Result<HashMap<String, String>, ScraperError> {
+pub fn parse_term_labels(
+    text: &str,
+    ids: &[String],
+) -> Result<HashMap<String, String>, ScraperError> {
     let value: serde_json::Value = parse_json_lenient(text)?;
     let mut out = HashMap::new();
     let mut take = |id: &str, label: &str| {
@@ -566,8 +785,12 @@ pub fn parse_term_labels(text: &str, ids: &[String]) -> Result<HashMap<String, S
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                let id = ["canonical_id", "id", "term"].iter().find_map(|k| item.get(*k).and_then(|v| v.as_str()));
-                let label = ["label", "name", "translation", "text"].iter().find_map(|k| item.get(*k).and_then(|v| v.as_str()));
+                let id = ["canonical_id", "id", "term"]
+                    .iter()
+                    .find_map(|k| item.get(*k).and_then(|v| v.as_str()));
+                let label = ["label", "name", "translation", "text"]
+                    .iter()
+                    .find_map(|k| item.get(*k).and_then(|v| v.as_str()));
                 if let (Some(id), Some(label)) = (id, label) {
                     take(id, label);
                 }
@@ -591,7 +814,13 @@ fn strings_from(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
                     .find_map(|k| o.get(*k).and_then(|t| t.as_str()))
                     .unwrap_or("")
                     .to_string();
-                (o.get("index").and_then(|n| n.as_u64()).map(|n| n as usize).unwrap_or(i), text)
+                (
+                    o.get("index")
+                        .and_then(|n| n.as_u64())
+                        .map(|n| n as usize)
+                        .unwrap_or(i),
+                    text,
+                )
             }
             _ => (i, String::new()),
         };
@@ -603,7 +832,10 @@ fn strings_from(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
 
 /// Parse a translation reply against its request: lists must match in length,
 /// optional parts fall back to the source.
-pub fn parse_translation_reply(text: &str, req: &TranslationRequest) -> Result<TranslationReply, ScraperError> {
+pub fn parse_translation_reply(
+    text: &str,
+    req: &TranslationRequest,
+) -> Result<TranslationReply, ScraperError> {
     let mut value: serde_json::Value = parse_json_lenient(text)?;
     for key in ["translation", "result", "data"] {
         if let Some(inner) = value.get(key).filter(|v| v.is_object()).cloned() {
@@ -625,7 +857,8 @@ pub fn parse_translation_reply(text: &str, req: &TranslationRequest) -> Result<T
             ingredients.len()
         )));
     }
-    let instructions = strings_from(value.get("instructions").or_else(|| value.get("steps"))).unwrap_or_default();
+    let instructions =
+        strings_from(value.get("instructions").or_else(|| value.get("steps"))).unwrap_or_default();
     if instructions.len() != req.instructions.len() {
         return Err(ScraperError::TranslationIncomplete(format!(
             "expected {} steps, got {}",
@@ -640,48 +873,84 @@ pub fn parse_translation_reply(text: &str, req: &TranslationRequest) -> Result<T
         .filter(|d| !d.is_empty())
         .map(str::to_string)
         .or_else(|| req.description.clone());
-    let tags = strings_from(value.get("tags")).filter(|t| t.len() == req.tags.len()).unwrap_or_else(|| req.tags.clone());
-    Ok(TranslationReply { title, description, ingredients, instructions, tags })
+    let tags = strings_from(value.get("tags"))
+        .filter(|t| t.len() == req.tags.len())
+        .unwrap_or_else(|| req.tags.clone());
+    Ok(TranslationReply {
+        title,
+        description,
+        ingredients,
+        instructions,
+        tags,
+    })
 }
 
 /// Parse an ingredient-normalization reply (wrapped object or bare array).
 pub fn parse_ingredients_reply(text: &str) -> Result<Vec<IngredientItem>, ScraperError> {
     let wire: WireIngredients = parse_json_lenient(text)?;
     let items = match wire {
-        WireIngredients::Wrapped { ingredients } | WireIngredients::Bare(ingredients) => ingredients,
+        WireIngredients::Wrapped { ingredients } | WireIngredients::Bare(ingredients) => {
+            ingredients
+        }
     };
-    Ok(items.into_iter().filter_map(WireIngredient::into_item).collect())
+    Ok(items
+        .into_iter()
+        .filter_map(WireIngredient::into_item)
+        .collect())
 }
 
 /// Structured-extraction backend used by the importer.
 pub trait RecipeExtractor: Send + Sync {
     /// Normalize raw ingredient lines into the 3-tier model (stage 1 micro-normalization).
-    fn normalize_ingredients<'a>(&'a self, raw: &'a [String]) -> BoxFuture<'a, Result<Vec<IngredientItem>, ScraperError>>;
+    fn normalize_ingredients<'a>(
+        &'a self,
+        raw: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<IngredientItem>, ScraperError>>;
     /// Extract a whole recipe from sanitized Markdown or plain text (stage 2).
-    fn extract_recipe<'a>(&'a self, markdown: &'a str) -> BoxFuture<'a, Result<ExtractedRecipeDraft, ScraperError>>;
+    fn extract_recipe<'a>(
+        &'a self,
+        markdown: &'a str,
+    ) -> BoxFuture<'a, Result<ExtractedRecipeDraft, ScraperError>>;
     /// Whether the backend can read images at all.
     fn supports_images(&self) -> bool {
         false
     }
     /// Transcribe a recipe from photos (cookbook page, card, dish).
-    fn extract_from_photos<'a>(&'a self, _photos: &'a [NormalizedPhoto]) -> BoxFuture<'a, Result<PhotoExtraction, ScraperError>> {
-        Box::pin(async { Err(ScraperError::ModelCannotSeeImages("no LLM is configured, so the node".to_string())) })
+    fn extract_from_photos<'a>(
+        &'a self,
+        _photos: &'a [NormalizedPhoto],
+    ) -> BoxFuture<'a, Result<PhotoExtraction, ScraperError>> {
+        Box::pin(async {
+            Err(ScraperError::ModelCannotSeeImages(
+                "no LLM is configured, so the node".to_string(),
+            ))
+        })
     }
     /// Whether this backend can translate recipe wording.
     fn supports_translation(&self) -> bool {
         true
     }
     /// Translate the presentation strings of a recipe.
-    fn translate_recipe<'a>(&'a self, _req: &'a TranslationRequest) -> BoxFuture<'a, Result<TranslationReply, ScraperError>> {
+    fn translate_recipe<'a>(
+        &'a self,
+        _req: &'a TranslationRequest,
+    ) -> BoxFuture<'a, Result<TranslationReply, ScraperError>> {
         Box::pin(async { Err(ScraperError::LlmUnavailable) })
     }
     /// Language of `sample` as a BCP-47 code when the model can tell; the
     /// offline heuristic (`langdetect`) is tried by callers first.
-    fn detect_language<'a>(&'a self, _sample: &'a str) -> BoxFuture<'a, Result<Option<String>, ScraperError>> {
+    fn detect_language<'a>(
+        &'a self,
+        _sample: &'a str,
+    ) -> BoxFuture<'a, Result<Option<String>, ScraperError>> {
         Box::pin(async { Err(ScraperError::LlmUnavailable) })
     }
     /// Localized display labels for canonical ingredient ids (`garlic` -> "чеснок").
-    fn translate_terms<'a>(&'a self, _ids: &'a [String], _lang: &'a str) -> BoxFuture<'a, Result<HashMap<String, String>, ScraperError>> {
+    fn translate_terms<'a>(
+        &'a self,
+        _ids: &'a [String],
+        _lang: &'a str,
+    ) -> BoxFuture<'a, Result<HashMap<String, String>, ScraperError>> {
         Box::pin(async { Err(ScraperError::LlmUnavailable) })
     }
 }
@@ -695,11 +964,17 @@ impl RecipeExtractor for HeuristicExtractor {
         false
     }
 
-    fn normalize_ingredients<'a>(&'a self, raw: &'a [String]) -> BoxFuture<'a, Result<Vec<IngredientItem>, ScraperError>> {
+    fn normalize_ingredients<'a>(
+        &'a self,
+        raw: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<IngredientItem>, ScraperError>> {
         Box::pin(async move { Ok(raw.iter().map(|r| heuristic_ingredient(r)).collect()) })
     }
 
-    fn extract_recipe<'a>(&'a self, _markdown: &'a str) -> BoxFuture<'a, Result<ExtractedRecipeDraft, ScraperError>> {
+    fn extract_recipe<'a>(
+        &'a self,
+        _markdown: &'a str,
+    ) -> BoxFuture<'a, Result<ExtractedRecipeDraft, ScraperError>> {
         Box::pin(async { Err(ScraperError::LlmUnavailable) })
     }
 }
@@ -741,7 +1016,9 @@ pub struct RigExtractor {
 
 impl std::fmt::Debug for RigExtractor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RigExtractor").field("reference", &self.reference).finish()
+        f.debug_struct("RigExtractor")
+            .field("reference", &self.reference)
+            .finish()
     }
 }
 
@@ -752,7 +1029,10 @@ impl RigExtractor {
         let model = Catalog::builtin()
             .connect_with(reference, connect_options())
             .map_err(|e| ScraperError::Llm(format!("cannot connect to {reference}: {e}")))?;
-        Ok(Self { model, reference: reference.to_string() })
+        Ok(Self {
+            model,
+            reference: reference.to_string(),
+        })
     }
 
     /// Build from `LLM_MODEL`; `Ok(None)` when it is unset.
@@ -767,16 +1047,29 @@ impl RigExtractor {
         &self.reference
     }
 
-    async fn complete<T: JsonSchema>(&self, preamble: &str, prompt: String) -> Result<String, ScraperError> {
-        self.complete_message::<T>(preamble, Message::user(prompt)).await
+    async fn complete<T: JsonSchema>(
+        &self,
+        preamble: &str,
+        prompt: String,
+    ) -> Result<String, ScraperError> {
+        self.complete_message::<T>(preamble, Message::user(prompt))
+            .await
     }
 
-    async fn complete_message<T: JsonSchema>(&self, preamble: &str, message: Message) -> Result<String, ScraperError> {
+    async fn complete_message<T: JsonSchema>(
+        &self,
+        preamble: &str,
+        message: Message,
+    ) -> Result<String, ScraperError> {
         let request = CompletionRequest::new(message)
             .preamble(preamble)
             .temperature(0.0)
             .output_schema(schema_for!(T));
-        let response = self.model.call(request).await.map_err(|e| ScraperError::Llm(e.to_string()))?;
+        let response = self
+            .model
+            .call(request)
+            .await
+            .map_err(|e| ScraperError::Llm(e.to_string()))?;
         let text = response.text();
         tracing::debug!(model = %self.reference, chars = text.len(), "llm reply received");
         tracing::trace!(reply = %text, "llm reply body");
@@ -796,39 +1089,67 @@ pub fn parse_json_lenient<T: DeserializeOwned>(text: &str) -> Result<T, ScraperE
         _ => ('{', '}'),
     };
     let snippet: String = trimmed.chars().take(200).collect();
-    let start = trimmed.find(open).ok_or_else(|| ScraperError::Llm(format!("no JSON in model output: {snippet}")))?;
-    let end = trimmed.rfind(close).ok_or_else(|| ScraperError::Llm("unterminated JSON in model output".to_string()))?;
+    let start = trimmed
+        .find(open)
+        .ok_or_else(|| ScraperError::Llm(format!("no JSON in model output: {snippet}")))?;
+    let end = trimmed
+        .rfind(close)
+        .ok_or_else(|| ScraperError::Llm("unterminated JSON in model output".to_string()))?;
     if end <= start {
-        return Err(ScraperError::Llm("malformed JSON in model output".to_string()));
+        return Err(ScraperError::Llm(
+            "malformed JSON in model output".to_string(),
+        ));
     }
     serde_json::from_str::<T>(&trimmed[start..=end]).map_err(|e| {
         let snippet: String = trimmed.chars().take(400).collect();
-        ScraperError::Llm(format!("model output did not match the schema ({e}); output starts: {snippet}"))
+        ScraperError::Llm(format!(
+            "model output did not match the schema ({e}); output starts: {snippet}"
+        ))
     })
 }
 
 impl RecipeExtractor for RigExtractor {
-    fn detect_language<'a>(&'a self, sample: &'a str) -> BoxFuture<'a, Result<Option<String>, ScraperError>> {
+    fn detect_language<'a>(
+        &'a self,
+        sample: &'a str,
+    ) -> BoxFuture<'a, Result<Option<String>, ScraperError>> {
         Box::pin(async move {
             let sample: String = sample.chars().take(1200).collect();
-            let reply = self.complete::<DetectedLanguage>(DETECT_PREAMBLE, sample).await?;
+            let reply = self
+                .complete::<DetectedLanguage>(DETECT_PREAMBLE, sample)
+                .await?;
             let value: serde_json::Value = parse_json_lenient(&reply)?;
-            Ok(value.get("language").and_then(|v| v.as_str()).and_then(recipe_core::normalize_lang))
+            Ok(value
+                .get("language")
+                .and_then(|v| v.as_str())
+                .and_then(recipe_core::normalize_lang))
         })
     }
 
-    fn translate_terms<'a>(&'a self, ids: &'a [String], lang: &'a str) -> BoxFuture<'a, Result<HashMap<String, String>, ScraperError>> {
+    fn translate_terms<'a>(
+        &'a self,
+        ids: &'a [String],
+        lang: &'a str,
+    ) -> BoxFuture<'a, Result<HashMap<String, String>, ScraperError>> {
         Box::pin(async move {
-            let prompt = format!("Target language: {lang}\nIds: {}", serde_json::to_string(ids)?);
+            let prompt = format!(
+                "Target language: {lang}\nIds: {}",
+                serde_json::to_string(ids)?
+            );
             let reply = self.complete::<TermLabels>(TERMS_PREAMBLE, prompt).await?;
             parse_term_labels(&reply, ids)
         })
     }
 
-    fn translate_recipe<'a>(&'a self, req: &'a TranslationRequest) -> BoxFuture<'a, Result<TranslationReply, ScraperError>> {
+    fn translate_recipe<'a>(
+        &'a self,
+        req: &'a TranslationRequest,
+    ) -> BoxFuture<'a, Result<TranslationReply, ScraperError>> {
         Box::pin(async move {
             let prompt = serde_json::to_string_pretty(req)?;
-            let reply = self.complete::<TranslationReply>(TRANSLATE_PREAMBLE, prompt).await?;
+            let reply = self
+                .complete::<TranslationReply>(TRANSLATE_PREAMBLE, prompt)
+                .await?;
             parse_translation_reply(&reply, req).inspect_err(|e| {
                 let head: String = reply.chars().take(2000).collect();
                 tracing::debug!(error = %e, reply_head = %head, "translation reply rejected");
@@ -841,10 +1162,16 @@ impl RecipeExtractor for RigExtractor {
         self.model.spec().map(|s| s.input.image).unwrap_or(true)
     }
 
-    fn extract_from_photos<'a>(&'a self, photos: &'a [NormalizedPhoto]) -> BoxFuture<'a, Result<PhotoExtraction, ScraperError>> {
+    fn extract_from_photos<'a>(
+        &'a self,
+        photos: &'a [NormalizedPhoto],
+    ) -> BoxFuture<'a, Result<PhotoExtraction, ScraperError>> {
         Box::pin(async move {
             if !self.supports_images() {
-                return Err(ScraperError::ModelCannotSeeImages(format!("model `{}`", self.reference)));
+                return Err(ScraperError::ModelCannotSeeImages(format!(
+                    "model `{}`",
+                    self.reference
+                )));
             }
             let mut content: Vec<UserContent> = photos
                 .iter()
@@ -857,7 +1184,9 @@ impl RecipeExtractor for RigExtractor {
                 })
                 .collect();
             content.push(UserContent::text(PHOTO_PROMPT));
-            let reply = self.complete_message::<PhotoExtraction>(PHOTO_PREAMBLE, Message::User { content }).await?;
+            let reply = self
+                .complete_message::<PhotoExtraction>(PHOTO_PREAMBLE, Message::User { content })
+                .await?;
             let parsed = parse_photo_reply(&reply).inspect_err(|e| {
                 let head: String = reply.chars().take(3000).collect();
                 tracing::debug!(error = %e, reply_head = %head, "photo reply rejected");
@@ -874,27 +1203,46 @@ impl RecipeExtractor for RigExtractor {
         })
     }
 
-    fn normalize_ingredients<'a>(&'a self, raw: &'a [String]) -> BoxFuture<'a, Result<Vec<IngredientItem>, ScraperError>> {
+    fn normalize_ingredients<'a>(
+        &'a self,
+        raw: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<IngredientItem>, ScraperError>> {
         Box::pin(async move {
             if raw.is_empty() {
                 return Ok(Vec::new());
             }
-            let prompt = raw.iter().enumerate().map(|(i, r)| format!("{}. {r}", i + 1)).collect::<Vec<_>>().join("\n");
-            let reply = self.complete::<NormalizedIngredients>(NORMALIZE_PREAMBLE, prompt).await?;
+            let prompt = raw
+                .iter()
+                .enumerate()
+                .map(|(i, r)| format!("{}. {r}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let reply = self
+                .complete::<NormalizedIngredients>(NORMALIZE_PREAMBLE, prompt)
+                .await?;
             let items = parse_ingredients_reply(&reply).inspect_err(|e| {
                 let head: String = reply.chars().take(3000).collect();
                 tracing::debug!(error = %e, reply_head = %head, "ingredient reply rejected");
             })?;
             if items.len() != raw.len() {
-                tracing::warn!(expected = raw.len(), got = items.len(), "normalization returned a different number of ingredients");
+                tracing::warn!(
+                    expected = raw.len(),
+                    got = items.len(),
+                    "normalization returned a different number of ingredients"
+                );
             }
             Ok(items)
         })
     }
 
-    fn extract_recipe<'a>(&'a self, markdown: &'a str) -> BoxFuture<'a, Result<ExtractedRecipeDraft, ScraperError>> {
+    fn extract_recipe<'a>(
+        &'a self,
+        markdown: &'a str,
+    ) -> BoxFuture<'a, Result<ExtractedRecipeDraft, ScraperError>> {
         Box::pin(async move {
-            let reply = self.complete::<ExtractedRecipeDraft>(EXTRACT_PREAMBLE, markdown.to_string()).await?;
+            let reply = self
+                .complete::<ExtractedRecipeDraft>(EXTRACT_PREAMBLE, markdown.to_string())
+                .await?;
             parse_recipe_reply(&reply).inspect_err(|e| {
                 let head: String = reply.chars().take(3000).collect();
                 tracing::debug!(error = %e, reply_head = %head, "recipe reply rejected");
@@ -912,7 +1260,9 @@ pub fn extractor_from_env() -> Arc<dyn RecipeExtractor> {
             Arc::new(rig)
         }
         Ok(None) => {
-            tracing::warn!("{LLM_MODEL_ENV} not set; using heuristic ingredient normalization, free-text import disabled");
+            tracing::warn!(
+                "{LLM_MODEL_ENV} not set; using heuristic ingredient normalization, free-text import disabled"
+            );
             Arc::new(HeuristicExtractor)
         }
         Err(e) => {

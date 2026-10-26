@@ -63,7 +63,11 @@ impl RecipeExtractor for FakeLlm {
                     is_specialty: false,
                     canonical_label: None,
                 }],
-                instructions: vec![InstructionStep { step_number: 1, text: "Fry for 3 minutes.".into(), timer_seconds: None }],
+                instructions: vec![InstructionStep {
+                    step_number: 1,
+                    text: "Fry for 3 minutes.".into(),
+                    timer_seconds: None,
+                }],
                 tags: vec!["Breakfast".into()],
                 language: None,
             })
@@ -73,12 +77,19 @@ impl RecipeExtractor for FakeLlm {
 
 async fn app_with(extractor: Arc<dyn RecipeExtractor>) -> (Router, PathBuf) {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir: PathBuf = std::env::temp_dir().join(format!("node-import-test-{}-{n}", std::process::id()));
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("node-import-test-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = Db::open(dir.join("recipes.db")).await.unwrap();
-    let state = AppState::new(db, NodeInfo { author_did: None, chef_name: "T".into() })
-        .with_importer(RecipeImporter::new(extractor))
-        .with_image_dir(dir.join("images"));
+    let state = AppState::new(
+        db,
+        NodeInfo {
+            author_did: None,
+            chef_name: "T".into(),
+        },
+    )
+    .with_importer(RecipeImporter::new(extractor))
+    .with_image_dir(dir.join("images"));
     (build_router(state), dir)
 }
 
@@ -94,7 +105,12 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
     let res = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let json = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into())) };
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()))
+    };
     (status, json)
 }
 
@@ -115,9 +131,26 @@ async fn fake_site() -> String {
         </script></head><body><h1>Site Pho</h1></body></html>"#
         .to_string();
     let site = Router::new()
-        .route("/pho", get(move || { let p = page.clone(); async move { ([(header::CONTENT_TYPE, "text/html")], p) } }))
-        .route("/cover.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], png(1600, 800)) }))
-        .route("/plain", get(|| async { ([(header::CONTENT_TYPE, "text/html")], "<h1>Plain Eggs</h1><p>Fry them.</p>") }));
+        .route(
+            "/pho",
+            get(move || {
+                let p = page.clone();
+                async move { ([(header::CONTENT_TYPE, "text/html")], p) }
+            }),
+        )
+        .route(
+            "/cover.png",
+            get(|| async { ([(header::CONTENT_TYPE, "image/png")], png(1600, 800)) }),
+        )
+        .route(
+            "/plain",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/html")],
+                    "<h1>Plain Eggs</h1><p>Fry them.</p>",
+                )
+            }),
+        );
     tokio::spawn(async move { axum::serve(listener, site).await.unwrap() });
     base
 }
@@ -125,23 +158,44 @@ async fn fake_site() -> String {
 #[tokio::test]
 async fn import_text_creates_recipe_via_extractor() {
     let (app, _) = app_with(Arc::new(FakeLlm)).await;
-    let (status, body) = send(&app, "POST", "/api/v1/import/text", Some(json!({"text": "Fry two eggs", "origin_url": "https://ig/p/1", "is_public": true}))).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/text",
+        Some(json!({"text": "Fry two eggs", "origin_url": "https://ig/p/1", "is_public": true})),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["title"], "Extracted: Fry two eggs");
     assert_eq!(body["origin_url"], "https://ig/p/1");
     assert_eq!(body["is_public"], true);
-    assert_eq!(body["instructions"][0]["timer_seconds"], 180, "timer filled from text");
+    assert_eq!(
+        body["instructions"][0]["timer_seconds"], 180,
+        "timer filled from text"
+    );
     assert_eq!(body["tags"], json!(["breakfast"]));
     assert_eq!(body["content_hash"].as_str().unwrap().len(), 64);
 
-    let (_, fetched) = send(&app, "GET", &format!("/api/v1/recipes/{}", body["id"].as_str().unwrap()), None).await;
+    let (_, fetched) = send(
+        &app,
+        "GET",
+        &format!("/api/v1/recipes/{}", body["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
     assert_eq!(fetched, body);
 }
 
 #[tokio::test]
 async fn import_text_without_llm_returns_503_json() {
     let (app, _) = app_with(Arc::new(HeuristicExtractor)).await;
-    let (status, body) = send(&app, "POST", "/api/v1/import/text", Some(json!({"text": "Fry two eggs"}))).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/text",
+        Some(json!({"text": "Fry two eggs"})),
+    )
+    .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert!(body["error"].as_str().unwrap().contains("LLM_MODEL"));
 }
@@ -149,9 +203,21 @@ async fn import_text_without_llm_returns_503_json() {
 #[tokio::test]
 async fn import_text_rejects_blank_and_malformed_bodies() {
     let (app, _) = app_with(Arc::new(FakeLlm)).await;
-    let (status, _) = send(&app, "POST", "/api/v1/import/text", Some(json!({"text": "   "}))).await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/v1/import/text",
+        Some(json!({"text": "   "})),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, body) = send(&app, "POST", "/api/v1/import/text", Some(json!({"nope": 1}))).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/text",
+        Some(json!({"nope": 1})),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].is_string());
 }
@@ -160,7 +226,13 @@ async fn import_text_rejects_blank_and_malformed_bodies() {
 async fn import_url_uses_jsonld_stores_webp_cover_and_serves_it() {
     let (app, dir) = app_with(Arc::new(HeuristicExtractor)).await;
     let base = fake_site().await;
-    let (status, body) = send(&app, "POST", "/api/v1/import/url", Some(json!({"url": format!("{base}/pho"), "is_public": true}))).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/url",
+        Some(json!({"url": format!("{base}/pho"), "is_public": true})),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["title"], "Site Pho");
     assert_eq!(body["servings"], 3);
@@ -172,7 +244,15 @@ async fn import_url_uses_jsonld_stores_webp_cover_and_serves_it() {
     assert_eq!(body["image_path"], format!("images/{id}.webp"));
     assert!(dir.join("images").join(format!("{id}.webp")).exists());
 
-    let res = app.clone().oneshot(Request::get(format!("/images/{id}.webp")).body(Body::empty()).unwrap()).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/images/{id}.webp"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()[header::CONTENT_TYPE], "image/webp");
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
@@ -184,7 +264,13 @@ async fn import_url_uses_jsonld_stores_webp_cover_and_serves_it() {
 async fn import_url_without_jsonld_falls_back_to_extractor() {
     let (app, _) = app_with(Arc::new(FakeLlm)).await;
     let base = fake_site().await;
-    let (status, body) = send(&app, "POST", "/api/v1/import/url", Some(json!({"url": format!("{base}/plain")}))).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/url",
+        Some(json!({"url": format!("{base}/plain")})),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["title"], "Extracted: # Plain Eggs");
     assert_eq!(body["is_public"], false);
@@ -195,17 +281,41 @@ async fn import_url_without_jsonld_falls_back_to_extractor() {
 async fn import_url_failures_map_to_clean_errors() {
     let (app, _) = app_with(Arc::new(FakeLlm)).await;
     let base = fake_site().await;
-    let (status, body) = send(&app, "POST", "/api/v1/import/url", Some(json!({"url": format!("{base}/missing")}))).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/url",
+        Some(json!({"url": format!("{base}/missing")})),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(body["error"].is_string());
 
-    let (status, _) = send(&app, "POST", "/api/v1/import/url", Some(json!({"url": "http://127.0.0.1:9/unreachable"}))).await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/v1/import/url",
+        Some(json!({"url": "http://127.0.0.1:9/unreachable"})),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
 
-    let (status, _) = send(&app, "POST", "/api/v1/import/url", Some(json!({"url": "not a url"}))).await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/v1/import/url",
+        Some(json!({"url": "not a url"})),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let (status, _) = send(&app, "POST", "/api/v1/import/url", Some(json!({"is_public": true}))).await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/v1/import/url",
+        Some(json!({"is_public": true})),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -228,7 +338,8 @@ fn mealie_zip() -> Vec<u8> {
     let opts = zip::write::SimpleFileOptions::default();
     w.start_file("database.json", opts).unwrap();
     w.write_all(db.to_string().as_bytes()).unwrap();
-    w.start_file("data/recipes/r-1/images/original.png", opts).unwrap();
+    w.start_file("data/recipes/r-1/images/original.png", opts)
+        .unwrap();
     w.write_all(&png(20, 10)).unwrap();
     w.finish().unwrap().into_inner()
 }
@@ -243,11 +354,18 @@ fn multipart(field: &str, filename: &str, bytes: &[u8]) -> (String, Vec<u8>) {
 }
 
 async fn upload(app: &Router, ct: String, body: Vec<u8>) -> (StatusCode, Value) {
-    let req = Request::post("/api/v1/import/mealie-backup").header(header::CONTENT_TYPE, ct).body(Body::from(body)).unwrap();
+    let req = Request::post("/api/v1/import/mealie-backup")
+        .header(header::CONTENT_TYPE, ct)
+        .body(Body::from(body))
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into())))
+    (
+        status,
+        serde_json::from_slice(&bytes)
+            .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into())),
+    )
 }
 
 #[tokio::test]
@@ -262,11 +380,20 @@ async fn mealie_backup_upload_imports_all_recipes_with_images() {
 
     let (_, list) = send(&app, "GET", "/api/v1/recipes?q=mealie", None).await;
     assert_eq!(list["items"].as_array().unwrap().len(), 2);
-    let pho = list["items"].as_array().unwrap().iter().find(|r| r["title"] == "Mealie Pho").unwrap();
+    let pho = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["title"] == "Mealie Pho")
+        .unwrap();
     assert!(pho["image_path"].as_str().unwrap().ends_with(".webp"));
     assert_eq!(pho["total_time_minutes"], 390);
     assert_eq!(pho["tags"], json!(["soup"]));
-    assert_eq!(std::fs::read_dir(dir.join("images")).unwrap().count(), 1, "only pho had an image");
+    assert_eq!(
+        std::fs::read_dir(dir.join("images")).unwrap().count(),
+        1,
+        "only pho had an image"
+    );
 }
 
 #[tokio::test]
@@ -285,12 +412,19 @@ async fn mealie_backup_upload_rejects_non_zip_and_missing_file() {
 #[tokio::test]
 async fn image_route_rejects_traversal_and_unknown_files() {
     let (app, _) = app_with(Arc::new(HeuristicExtractor)).await;
-    for path in ["/images/nope.webp", "/images/..%2F..%2Fetc%2Fpasswd", "/images/x.png"] {
-        let res = app.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+    for path in [
+        "/images/nope.webp",
+        "/images/..%2F..%2Fetc%2Fpasswd",
+        "/images/x.png",
+    ] {
+        let res = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
     }
 }
-
 
 fn image_multipart(bytes: &[u8]) -> (String, Vec<u8>) {
     multipart("file", "cover.png", bytes)
@@ -299,18 +433,30 @@ fn image_multipart(bytes: &[u8]) -> (String, Vec<u8>) {
 #[tokio::test]
 async fn cover_upload_stores_webp_and_updates_recipe() {
     let (app, dir) = app_with(Arc::new(HeuristicExtractor)).await;
-    let (_, created) = send(&app, "POST", "/api/v1/recipes", Some(json!({"title": "Manual", "ingredients": [], "instructions": []}))).await;
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/v1/recipes",
+        Some(json!({"title": "Manual", "ingredients": [], "instructions": []})),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["image_path"], Value::Null);
 
     let (ct, body) = image_multipart(&png(1400, 700));
-    let req = Request::put(format!("/api/v1/recipes/{id}/image")).header(header::CONTENT_TYPE, ct).body(Body::from(body)).unwrap();
+    let req = Request::put(format!("/api/v1/recipes/{id}/image"))
+        .header(header::CONTENT_TYPE, ct)
+        .body(Body::from(body))
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let updated: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(updated["image_path"], format!("images/{id}.webp"));
-    assert_eq!(updated["content_hash"], created["content_hash"], "cover does not change the content hash");
+    assert_eq!(
+        updated["content_hash"], created["content_hash"],
+        "cover does not change the content hash"
+    );
     let stored = image::open(dir.join("images").join(format!("{id}.webp"))).unwrap();
     assert_eq!(stored.width(), 1200, "downsized");
 
@@ -321,16 +467,28 @@ async fn cover_upload_stores_webp_and_updates_recipe() {
 #[tokio::test]
 async fn cover_upload_rejects_garbage_and_unknown_recipe() {
     let (app, _) = app_with(Arc::new(HeuristicExtractor)).await;
-    let (_, created) = send(&app, "POST", "/api/v1/recipes", Some(json!({"title": "Manual"}))).await;
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/v1/recipes",
+        Some(json!({"title": "Manual"})),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
     let (ct, body) = image_multipart(b"definitely not an image");
-    let req = Request::put(format!("/api/v1/recipes/{id}/image")).header(header::CONTENT_TYPE, ct).body(Body::from(body)).unwrap();
+    let req = Request::put(format!("/api/v1/recipes/{id}/image"))
+        .header(header::CONTENT_TYPE, ct)
+        .body(Body::from(body))
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     let (ct, body) = image_multipart(&png(10, 10));
-    let req = Request::put("/api/v1/recipes/nope/image").header(header::CONTENT_TYPE, ct).body(Body::from(body)).unwrap();
+    let req = Request::put("/api/v1/recipes/nope/image")
+        .header(header::CONTENT_TYPE, ct)
+        .body(Body::from(body))
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
@@ -338,11 +496,23 @@ async fn cover_upload_rejects_garbage_and_unknown_recipe() {
 #[tokio::test]
 async fn deleting_a_recipe_removes_its_cover_file() {
     let (app, dir) = app_with(Arc::new(HeuristicExtractor)).await;
-    let (_, created) = send(&app, "POST", "/api/v1/recipes", Some(json!({"title": "Manual"}))).await;
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/v1/recipes",
+        Some(json!({"title": "Manual"})),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
     let (ct, body) = image_multipart(&png(20, 20));
-    let req = Request::put(format!("/api/v1/recipes/{id}/image")).header(header::CONTENT_TYPE, ct).body(Body::from(body)).unwrap();
-    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let req = Request::put(format!("/api/v1/recipes/{id}/image"))
+        .header(header::CONTENT_TYPE, ct)
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
     let file = dir.join("images").join(format!("{id}.webp"));
     assert!(file.exists());
 
@@ -362,19 +532,33 @@ mod photos {
     }
 
     impl RecipeExtractor for VisionFake {
-        fn normalize_ingredients<'a>(&'a self, _raw: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<IngredientItem>, ScraperError>> + Send + 'a>> {
+        fn normalize_ingredients<'a>(
+            &'a self,
+            _raw: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<IngredientItem>, ScraperError>> + Send + 'a>>
+        {
             Box::pin(async { Ok(vec![]) })
         }
-        fn extract_recipe<'a>(&'a self, _m: &'a str) -> Pin<Box<dyn Future<Output = Result<ExtractedRecipeDraft, ScraperError>> + Send + 'a>> {
+        fn extract_recipe<'a>(
+            &'a self,
+            _m: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<ExtractedRecipeDraft, ScraperError>> + Send + 'a>>
+        {
             Box::pin(async { Err(ScraperError::LlmUnavailable) })
         }
         fn supports_images(&self) -> bool {
             true
         }
-        fn extract_from_photos<'a>(&'a self, photos: &'a [NormalizedPhoto]) -> Pin<Box<dyn Future<Output = Result<PhotoExtraction, ScraperError>> + Send + 'a>> {
+        fn extract_from_photos<'a>(
+            &'a self,
+            photos: &'a [NormalizedPhoto],
+        ) -> Pin<Box<dyn Future<Output = Result<PhotoExtraction, ScraperError>> + Send + 'a>>
+        {
             Box::pin(async move {
                 if !self.find_recipe {
-                    return Err(ScraperError::NoRecipeInPhotos("only a cat was found".into()));
+                    return Err(ScraperError::NoRecipeInPhotos(
+                        "only a cat was found".into(),
+                    ));
                 }
                 Ok(PhotoExtraction {
                     recipe: ExtractedRecipeDraft {
@@ -388,7 +572,15 @@ mod photos {
                         tags: vec![],
                         language: None,
                     },
-                    photos: photos.iter().enumerate().map(|(i, _)| PhotoInfo { index: i, kind: self.kind, notes: None }).collect(),
+                    photos: photos
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| PhotoInfo {
+                            index: i,
+                            kind: self.kind,
+                            notes: None,
+                        })
+                        .collect(),
                     unreadable: vec![],
                     language: None,
                 })
@@ -409,16 +601,27 @@ mod photos {
     }
 
     async fn post_photos(app: &Router, ct: String, body: Vec<u8>) -> (StatusCode, Value) {
-        let req = Request::post("/api/v1/import/photo").header(header::CONTENT_TYPE, ct).body(Body::from(body)).unwrap();
+        let req = Request::post("/api/v1/import/photo")
+            .header(header::CONTENT_TYPE, ct)
+            .body(Body::from(body))
+            .unwrap();
         let res = app.clone().oneshot(req).await.unwrap();
         let status = res.status();
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into())))
+        (
+            status,
+            serde_json::from_slice(&bytes)
+                .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into())),
+        )
     }
 
     #[tokio::test]
     async fn photo_import_creates_recipe_with_cover() {
-        let (app, dir) = app_with(Arc::new(VisionFake { kind: PhotoKind::Both, find_recipe: true })).await;
+        let (app, dir) = app_with(Arc::new(VisionFake {
+            kind: PhotoKind::Both,
+            find_recipe: true,
+        }))
+        .await;
         let (ct, body) = photos_multipart(&[&png(1800, 1200), &png(400, 300)], true);
         let (status, out) = post_photos(&app, ct, body).await;
         assert_eq!(status, StatusCode::CREATED, "{out}");
@@ -431,7 +634,11 @@ mod photos {
 
     #[tokio::test]
     async fn photo_import_error_paths() {
-        let (app, _) = app_with(Arc::new(VisionFake { kind: PhotoKind::RecipeText, find_recipe: false })).await;
+        let (app, _) = app_with(Arc::new(VisionFake {
+            kind: PhotoKind::RecipeText,
+            find_recipe: false,
+        }))
+        .await;
         let (ct, body) = photos_multipart(&[&png(50, 50)], false);
         let (status, out) = post_photos(&app, ct, body).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{out}");

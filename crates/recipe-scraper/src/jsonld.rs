@@ -42,7 +42,11 @@ pub fn parse_schema_org(html: &str) -> Option<SchemaOrgRecipe> {
                 .and_then(|v| match v {
                     Value::String(s) => Some(s.clone()),
                     Value::Array(a) => a.iter().find_map(|x| x.as_str().map(str::to_string)),
-                    Value::Object(o) => o.get("name").or_else(|| o.get("alternateName")).and_then(|x| x.as_str()).map(str::to_string),
+                    Value::Object(o) => o
+                        .get("name")
+                        .or_else(|| o.get("alternateName"))
+                        .and_then(|x| x.as_str())
+                        .map(str::to_string),
                     _ => None,
                 })
                 .and_then(|s| recipe_core::normalize_lang(&s))
@@ -70,7 +74,11 @@ fn find_recipe_node(v: &Value) -> Option<&Value> {
 }
 
 fn from_node(node: &Value) -> SchemaOrgRecipe {
-    let str_field = |k: &str| node.get(k).and_then(Value::as_str).map(|s| plain_text(s).join(" "));
+    let str_field = |k: &str| {
+        node.get(k)
+            .and_then(Value::as_str)
+            .map(|s| plain_text(s).join(" "))
+    };
     let mut instructions = Vec::new();
     if let Some(v) = node.get("recipeInstructions") {
         collect_instructions(v, &mut instructions);
@@ -96,14 +104,26 @@ fn from_node(node: &Value) -> SchemaOrgRecipe {
             .map(|v| {
                 let mut out = Vec::new();
                 collect_strings(v, &mut out);
-                out.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                out.into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
             })
             .unwrap_or_default(),
         instructions,
         servings: node.get("recipeYield").and_then(parse_yield),
-        prep_minutes: node.get("prepTime").and_then(Value::as_str).and_then(iso8601_duration_minutes),
-        cook_minutes: node.get("cookTime").and_then(Value::as_str).and_then(iso8601_duration_minutes),
-        total_minutes: node.get("totalTime").and_then(Value::as_str).and_then(iso8601_duration_minutes),
+        prep_minutes: node
+            .get("prepTime")
+            .and_then(Value::as_str)
+            .and_then(iso8601_duration_minutes),
+        cook_minutes: node
+            .get("cookTime")
+            .and_then(Value::as_str)
+            .and_then(iso8601_duration_minutes),
+        total_minutes: node
+            .get("totalTime")
+            .and_then(Value::as_str)
+            .and_then(iso8601_duration_minutes),
         image_url: node.get("image").and_then(first_image_url),
         tags,
         language: None,
@@ -130,7 +150,11 @@ fn collect_instructions(v: &Value, out: &mut Vec<String>) {
         Value::Object(obj) => {
             if let Some(items) = obj.get("itemListElement") {
                 collect_instructions(items, out);
-            } else if let Some(text) = obj.get("text").or_else(|| obj.get("name")).and_then(Value::as_str) {
+            } else if let Some(text) = obj
+                .get("text")
+                .or_else(|| obj.get("name"))
+                .and_then(Value::as_str)
+            {
                 out.extend(plain_text(text));
             }
         }
@@ -167,7 +191,10 @@ fn first_image_url(v: &Value) -> Option<String> {
     match v {
         Value::String(s) => Some(s.clone()),
         Value::Array(items) => items.iter().find_map(first_image_url),
-        Value::Object(obj) => obj.get("url").or_else(|| obj.get("contentUrl")).and_then(first_image_url),
+        Value::Object(obj) => obj
+            .get("url")
+            .or_else(|| obj.get("contentUrl"))
+            .and_then(first_image_url),
         _ => None,
     }
 }
@@ -175,7 +202,9 @@ fn first_image_url(v: &Value) -> Option<String> {
 fn parse_yield(v: &Value) -> Option<u8> {
     match v {
         Value::Number(n) => n.as_u64().and_then(|n| u8::try_from(n).ok()),
-        Value::String(s) => leading_number(s).and_then(|n| u8::try_from(n.round() as i64).ok()).filter(|n| *n > 0),
+        Value::String(s) => leading_number(s)
+            .and_then(|n| u8::try_from(n.round() as i64).ok())
+            .filter(|n| *n > 0),
         Value::Array(items) => items.iter().find_map(parse_yield),
         _ => None,
     }

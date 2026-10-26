@@ -7,8 +7,23 @@ fn finds_recipe_inside_graph_wrapper() {
     let r = parse_schema_org(PAGE).expect("recipe found");
     assert_eq!(r.name, "Beef Pho");
     assert_eq!(r.description.as_deref(), Some("A classic."));
-    assert_eq!(r.ingredients, vec!["1 kg beef bones", "3 star anise", "2 tbsp fish sauce", "salt to taste"]);
-    assert_eq!(r.instructions, vec!["Roast the bones for 30 minutes.", "Simmer for 6 hours.", "Serve & enjoy."]);
+    assert_eq!(
+        r.ingredients,
+        vec![
+            "1 kg beef bones",
+            "3 star anise",
+            "2 tbsp fish sauce",
+            "salt to taste"
+        ]
+    );
+    assert_eq!(
+        r.instructions,
+        vec![
+            "Roast the bones for 30 minutes.",
+            "Simmer for 6 hours.",
+            "Serve & enjoy."
+        ]
+    );
     assert_eq!(r.servings, Some(4));
     assert_eq!(r.prep_minutes, Some(30));
     assert_eq!(r.cook_minutes, Some(360));
@@ -35,7 +50,10 @@ fn finds_top_level_recipe_and_array_forms() {
 fn ignores_pages_without_recipe_or_with_broken_json() {
     assert!(parse_schema_org("<html><body>nothing</body></html>").is_none());
     assert!(parse_schema_org(r#"<script type="application/ld+json">{not json</script>"#).is_none());
-    assert!(parse_schema_org(r#"<script type="application/ld+json">{"@type":"Article"}</script>"#).is_none());
+    assert!(
+        parse_schema_org(r#"<script type="application/ld+json">{"@type":"Article"}</script>"#)
+            .is_none()
+    );
 }
 
 #[test]
@@ -60,9 +78,16 @@ fn parses_iso8601_durations() {
 #[test]
 fn language_comes_from_in_language_or_html_lang() {
     let html = r#"<html lang="nl-NL"><script type="application/ld+json">{"@type":"Recipe","name":"A","recipeIngredient":["x"],"recipeInstructions":"Do."}</script></html>"#;
-    assert_eq!(parse_schema_org(html).unwrap().language.as_deref(), Some("nl"));
+    assert_eq!(
+        parse_schema_org(html).unwrap().language.as_deref(),
+        Some("nl")
+    );
     let html = r#"<html lang="nl"><script type="application/ld+json">{"@type":"Recipe","name":"A","inLanguage":"ru-RU","recipeIngredient":["x"],"recipeInstructions":"Do."}</script></html>"#;
-    assert_eq!(parse_schema_org(html).unwrap().language.as_deref(), Some("ru"), "inLanguage wins");
+    assert_eq!(
+        parse_schema_org(html).unwrap().language.as_deref(),
+        Some("ru"),
+        "inLanguage wins"
+    );
     let html = r#"<script type="application/ld+json">{"@type":"Recipe","name":"A","recipeIngredient":["x"],"recipeInstructions":"Do."}</script>"#;
     assert_eq!(parse_schema_org(html).unwrap().language, None);
 }

@@ -39,7 +39,11 @@ async fn open_creates_database_file_if_missing() {
 async fn open_enforces_required_pragmas() {
     let db = Db::open(temp_db_path("pragmas")).await.unwrap();
     assert_eq!(pragma_text(&db, "journal_mode").await, "wal");
-    assert_eq!(pragma_text(&db, "synchronous").await, "1", "synchronous must be NORMAL (1)");
+    assert_eq!(
+        pragma_text(&db, "synchronous").await,
+        "1",
+        "synchronous must be NORMAL (1)"
+    );
     assert_eq!(pragma_text(&db, "foreign_keys").await, "1");
     assert_eq!(pragma_text(&db, "busy_timeout").await, "5000");
 }
@@ -47,10 +51,12 @@ async fn open_enforces_required_pragmas() {
 #[tokio::test]
 async fn open_applies_migrations() {
     let db = Db::open(temp_db_path("migrate")).await.unwrap();
-    let rows = sqlx::query("SELECT name FROM sqlite_master WHERE type IN ('table','trigger') ORDER BY name")
-        .fetch_all(db.pool())
-        .await
-        .unwrap();
+    let rows = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','trigger') ORDER BY name",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
     let names: Vec<String> = rows.iter().map(|r| r.get::<String, _>(0)).collect();
     for expected in [
         "recipes",
@@ -63,7 +69,10 @@ async fn open_applies_migrations() {
         "ingredients_fts_sync_au",
         "ingredients_fts_sync_ad",
     ] {
-        assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
+        assert!(
+            names.iter().any(|n| n == expected),
+            "missing {expected} in {names:?}"
+        );
     }
 
     let applied: i64 = sqlx::query("SELECT COUNT(*) FROM _sqlx_migrations")
@@ -105,7 +114,10 @@ async fn foreign_keys_cascade_delete_ingredients() {
         .execute(db.pool())
         .await
         .unwrap();
-    sqlx::query("DELETE FROM recipes WHERE id = 'r1'").execute(db.pool()).await.unwrap();
+    sqlx::query("DELETE FROM recipes WHERE id = 'r1'")
+        .execute(db.pool())
+        .await
+        .unwrap();
 
     let remaining: i64 = sqlx::query("SELECT COUNT(*) FROM recipe_ingredients")
         .fetch_one(db.pool())
@@ -135,16 +147,19 @@ async fn fts_index_tracks_ingredients() {
         .execute(db.pool())
         .await
         .unwrap();
-    let hit: String = sqlx::query("SELECT recipe_id FROM recipes_fts WHERE recipes_fts MATCH 'anise'")
-        .fetch_one(db.pool())
-        .await
-        .unwrap()
-        .get(0);
+    let hit: String =
+        sqlx::query("SELECT recipe_id FROM recipes_fts WHERE recipes_fts MATCH 'anise'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+            .get(0);
     assert_eq!(hit, "r1");
 }
 
 #[tokio::test]
 async fn open_fails_cleanly_for_unwritable_path() {
-    let err = Db::open("/nonexistent-dir-xyz/sub/recipes.db").await.unwrap_err();
+    let err = Db::open("/nonexistent-dir-xyz/sub/recipes.db")
+        .await
+        .unwrap_err();
     assert!(matches!(err, recipe_db::DbError::Sqlx(_)), "got {err:?}");
 }

@@ -8,7 +8,9 @@ pub enum ScraperError {
     Http(#[from] reqwest::Error),
     #[error("input is empty")]
     EmptyInput,
-    #[error("no LLM configured: set LLM_MODEL (e.g. anthropic/claude-haiku-4-5) to import unstructured content")]
+    #[error(
+        "no LLM configured: set LLM_MODEL (e.g. anthropic/claude-haiku-4-5) to import unstructured content"
+    )]
     LlmUnavailable,
     #[error("llm error: {0}")]
     Llm(String),

@@ -22,5 +22,8 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn languages(State(state): State<AppState>) -> Json<Languages> {
-    Json(Languages { ui: UI_LANGUAGES.to_vec(), content_translation: state.translations().can_translate() })
+    Json(Languages {
+        ui: UI_LANGUAGES.to_vec(),
+        content_translation: state.translations().can_translate(),
+    })
 }

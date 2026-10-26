@@ -2,15 +2,15 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::Router;
+use rmcp::transport::StreamableHttpService;
 use rmcp::transport::streamable_http_server::StreamableHttpServerConfig;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-use rmcp::transport::StreamableHttpService;
 
 use crate::auth::ct_eq;
 use crate::{ApiError, AppState};
@@ -33,21 +33,35 @@ pub fn router(state: &AppState) -> Router<AppState> {
     );
     Router::new()
         .nest_service("/mcp", service)
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ))
 }
 
-async fn require_bearer(State(state): State<AppState>, req: Request<Body>, next: Next) -> Result<Response, ApiError> {
+async fn require_bearer(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, ApiError> {
     let Some(expected) = state.mcp_api_key() else {
-        return Err(ApiError::ServiceUnavailable(format!("MCP endpoint disabled: set {API_KEY_ENV} to enable it")));
+        return Err(ApiError::ServiceUnavailable(format!(
+            "MCP endpoint disabled: set {API_KEY_ENV} to enable it"
+        )));
     };
     let presented = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
         .map(str::trim);
     match presented {
         Some(token) if ct_eq(token.as_bytes(), expected.as_bytes()) => Ok(next.run(req).await),
-        _ => Err(ApiError::Unauthorized("missing or invalid bearer token".to_string())),
+        _ => Err(ApiError::Unauthorized(
+            "missing or invalid bearer token".to_string(),
+        )),
     }
 }

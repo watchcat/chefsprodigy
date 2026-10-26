@@ -63,7 +63,11 @@ pub fn aggregate_shopping_list(recipes: &[(&Recipe, u8)], pantry: &[String]) -> 
     let mut lines: BTreeMap<(String, &'static str), ShoppingLine> = BTreeMap::new();
 
     for (recipe, servings) in recipes {
-        let scaled = if *servings == 0 { (*recipe).clone() } else { recipe.scaled_to(*servings) };
+        let scaled = if *servings == 0 {
+            (*recipe).clone()
+        } else {
+            recipe.scaled_to(*servings)
+        };
         let mut seen_in_recipe: Vec<(String, &'static str)> = Vec::new();
         for item in &scaled.ingredients {
             let id = item.canonical_id.trim().to_lowercase();
@@ -94,25 +98,50 @@ pub fn aggregate_shopping_list(recipes: &[(&Recipe, u8)], pantry: &[String]) -> 
         }
     }
 
-    let mut list = ShoppingList { basic_groceries: Vec::new(), specialty_items: Vec::new(), missing_recipes: Vec::new() };
+    let mut list = ShoppingList {
+        basic_groceries: Vec::new(),
+        specialty_items: Vec::new(),
+        missing_recipes: Vec::new(),
+    };
     for (_, mut line) in lines {
         line.total_amount = line.total_amount.map(|a| (a * 100.0).round() / 100.0);
-        if line.is_specialty { list.specialty_items.push(line) } else { list.basic_groceries.push(line) }
+        if line.is_specialty {
+            list.specialty_items.push(line)
+        } else {
+            list.basic_groceries.push(line)
+        }
     }
     list
 }
 
 /// Attach localized labels to every line.
-pub async fn label_lines(list: &mut ShoppingList, translations: &TranslationService, lang: &str) -> Result<(), McpToolError> {
-    let ids: Vec<String> = list.basic_groceries.iter().chain(list.specialty_items.iter()).map(|l| l.canonical_id.clone()).collect();
+pub async fn label_lines(
+    list: &mut ShoppingList,
+    translations: &TranslationService,
+    lang: &str,
+) -> Result<(), McpToolError> {
+    let ids: Vec<String> = list
+        .basic_groceries
+        .iter()
+        .chain(list.specialty_items.iter())
+        .map(|l| l.canonical_id.clone())
+        .collect();
     let labels = translations.labels(&ids, lang).await?;
-    for line in list.basic_groceries.iter_mut().chain(list.specialty_items.iter_mut()) {
+    for line in list
+        .basic_groceries
+        .iter_mut()
+        .chain(list.specialty_items.iter_mut())
+    {
         line.canonical_label = labels.get(&line.canonical_id).cloned();
     }
     Ok(())
 }
 
-pub async fn build(db: &Db, translations: &TranslationService, p: BuildShoppingListParams) -> Result<ShoppingList, McpToolError> {
+pub async fn build(
+    db: &Db,
+    translations: &TranslationService,
+    p: BuildShoppingListParams,
+) -> Result<ShoppingList, McpToolError> {
     build_with_visibility(db, translations, p, false, true).await
 }
 
@@ -126,7 +155,9 @@ pub async fn build_with_visibility(
     allow_live: bool,
 ) -> Result<ShoppingList, McpToolError> {
     if p.items.is_empty() {
-        return Err(McpToolError::InvalidInput("items must contain at least one recipe".to_string()));
+        return Err(McpToolError::InvalidInput(
+            "items must contain at least one recipe".to_string(),
+        ));
     }
     let mut loaded: Vec<(Recipe, u8)> = Vec::new();
     let mut missing = Vec::new();
@@ -140,9 +171,18 @@ pub async fn build_with_visibility(
     let mut list = aggregate_shopping_list(&pairs, &p.pantry_exclude_canonical_ids);
     list.missing_recipes = missing;
     if let Some(lang) = p.language.as_deref() {
-        let ids: Vec<String> = list.basic_groceries.iter().chain(list.specialty_items.iter()).map(|l| l.canonical_id.clone()).collect();
+        let ids: Vec<String> = list
+            .basic_groceries
+            .iter()
+            .chain(list.specialty_items.iter())
+            .map(|l| l.canonical_id.clone())
+            .collect();
         let labels = translations.labels_with(&ids, lang, allow_live).await?;
-        for line in list.basic_groceries.iter_mut().chain(list.specialty_items.iter_mut()) {
+        for line in list
+            .basic_groceries
+            .iter_mut()
+            .chain(list.specialty_items.iter_mut())
+        {
             line.canonical_label = labels.get(&line.canonical_id).cloned();
         }
     }

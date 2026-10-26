@@ -1,4 +1,6 @@
-use recipe_core::{IngredientItem, InstructionStep, MeasurementUnit, Recipe, calculate_content_hash};
+use recipe_core::{
+    IngredientItem, InstructionStep, MeasurementUnit, Recipe, calculate_content_hash,
+};
 
 fn ingredient(canonical_id: &str, amount: Option<f32>, unit: MeasurementUnit) -> IngredientItem {
     IngredientItem {
@@ -52,12 +54,18 @@ fn base_recipe() -> Recipe {
 fn hash_is_64_hex_chars() {
     let hash = calculate_content_hash(&base_recipe());
     assert_eq!(hash.len(), 64);
-    assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(
+        hash.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    );
 }
 
 #[test]
 fn hash_is_deterministic() {
-    assert_eq!(calculate_content_hash(&base_recipe()), calculate_content_hash(&base_recipe()));
+    assert_eq!(
+        calculate_content_hash(&base_recipe()),
+        calculate_content_hash(&base_recipe())
+    );
 }
 
 #[test]
@@ -147,5 +155,8 @@ fn hash_does_not_depend_on_stored_content_hash_field() {
 fn hash_is_stable_across_versions() {
     // Golden value: changing the algorithm breaks federation dedup, so this must be updated deliberately.
     let hash = calculate_content_hash(&base_recipe());
-    assert_eq!(hash, "a4b8a602a18fd7736998c18dab4a6c5c93f9364d6ba883000db869cf0eddec44");
+    assert_eq!(
+        hash,
+        "a4b8a602a18fd7736998c18dab4a6c5c93f9364d6ba883000db869cf0eddec44"
+    );
 }

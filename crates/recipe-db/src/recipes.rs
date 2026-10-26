@@ -5,7 +5,8 @@
 
 use chrono::{SecondsFormat, Utc};
 use recipe_core::{
-    IngredientItem, InstructionStep, ManifestEntry, Recipe, RecipeInput, RecipeSummary, SearchQuery, new_recipe_id,
+    IngredientItem, InstructionStep, ManifestEntry, Recipe, RecipeInput, RecipeSummary,
+    SearchQuery, new_recipe_id,
 };
 use sqlx::sqlite::Sqlite;
 use sqlx::{FromRow, QueryBuilder, SqliteConnection};
@@ -69,8 +70,10 @@ fn to_u8(field: &str, v: i64) -> Result<u8, DbError> {
 }
 
 fn to_opt_u16(field: &str, v: Option<i64>) -> Result<Option<u16>, DbError> {
-    v.map(|v| u16::try_from(v).map_err(|_| DbError::InvalidData(format!("{field} out of range: {v}"))))
-        .transpose()
+    v.map(|v| {
+        u16::try_from(v).map_err(|_| DbError::InvalidData(format!("{field} out of range: {v}")))
+    })
+    .transpose()
 }
 
 impl TryFrom<IngredientRow> for IngredientItem {
@@ -150,7 +153,11 @@ pub fn fts_expression(raw: &str) -> Option<String> {
         .filter(|t| !t.is_empty())
         .map(|t| format!("\"{t}\"*"))
         .collect();
-    if tokens.is_empty() { None } else { Some(tokens.join(" ")) }
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" "))
+    }
 }
 
 async fn insert_ingredients(
@@ -176,7 +183,10 @@ async fn insert_ingredients(
     Ok(())
 }
 
-async fn load_ingredients(conn: &mut SqliteConnection, recipe_id: &str) -> Result<Vec<IngredientItem>, DbError> {
+async fn load_ingredients(
+    conn: &mut SqliteConnection,
+    recipe_id: &str,
+) -> Result<Vec<IngredientItem>, DbError> {
     let rows: Vec<IngredientRow> = sqlx::query_as(
         "SELECT raw_text, metric_amount, unit, canonical_id, is_specialty \
          FROM recipe_ingredients WHERE recipe_id = ? ORDER BY position, id",
@@ -214,12 +224,15 @@ fn push_from_and_filters(qb: &mut QueryBuilder<Sqlite>, query: &SearchQuery, fts
                 SELECT recipe_id, rank FROM recipes_fts WHERE recipes_fts MATCH ",
         )
         .push_bind(expr.to_string())
-        .push(" UNION ALL SELECT recipe_id, rank FROM translations_fts WHERE translations_fts MATCH ")
+        .push(
+            " UNION ALL SELECT recipe_id, rank FROM translations_fts WHERE translations_fts MATCH ",
+        )
         .push_bind(expr.to_string())
         .push(") GROUP BY recipe_id) hits ON hits.recipe_id = r.id");
     }
     if let Some(lang) = query.lang.as_deref().and_then(recipe_core::normalize_lang) {
-        qb.push(" LEFT JOIN recipe_translations tr ON tr.recipe_id = r.id AND tr.lang = ").push_bind(lang);
+        qb.push(" LEFT JOIN recipe_translations tr ON tr.recipe_id = r.id AND tr.lang = ")
+            .push_bind(lang);
     }
     qb.push(" WHERE 1 = 1");
     if query.public_only {
@@ -299,7 +312,11 @@ impl Db {
     }
 
     /// Replace all mutable fields of an existing recipe. Returns `None` if it does not exist.
-    pub async fn update_recipe(&self, id: &str, input: RecipeInput) -> Result<Option<Recipe>, DbError> {
+    pub async fn update_recipe(
+        &self,
+        id: &str,
+        input: RecipeInput,
+    ) -> Result<Option<Recipe>, DbError> {
         let mut tx = self.pool().begin().await?;
         let Some(mut recipe) = load_recipe(&mut tx, id).await? else {
             return Ok(None);
@@ -425,7 +442,11 @@ impl Db {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(id, updated_at, content_hash)| ManifestEntry { id, updated_at, content_hash })
+            .map(|(id, updated_at, content_hash)| ManifestEntry {
+                id,
+                updated_at,
+                content_hash,
+            })
             .collect())
     }
 }

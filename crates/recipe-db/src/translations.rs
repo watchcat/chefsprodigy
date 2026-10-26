@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use recipe_core::{RecipeTranslation, TranslationOrigin};
+use sqlx::FromRow;
 use sqlx::QueryBuilder;
 use sqlx::sqlite::Sqlite;
-use sqlx::FromRow;
 
 use crate::{Db, DbError};
 
@@ -43,7 +43,11 @@ impl TryFrom<TranslationRow> for RecipeTranslation {
 
 impl Db {
     /// The stored translation of `recipe_id` into `lang`, if any.
-    pub async fn get_translation(&self, recipe_id: &str, lang: &str) -> Result<Option<RecipeTranslation>, DbError> {
+    pub async fn get_translation(
+        &self,
+        recipe_id: &str,
+        lang: &str,
+    ) -> Result<Option<RecipeTranslation>, DbError> {
         let row: Option<TranslationRow> = sqlx::query_as(
             "SELECT lang, title, description, ingredients, instructions, tags, origin, source_updated_at, created_at, updated_at \
              FROM recipe_translations WHERE recipe_id = ? AND lang = ?",
@@ -56,7 +60,11 @@ impl Db {
     }
 
     /// Insert or replace a translation (keyed by recipe and language).
-    pub async fn upsert_translation(&self, recipe_id: &str, t: &RecipeTranslation) -> Result<(), DbError> {
+    pub async fn upsert_translation(
+        &self,
+        recipe_id: &str,
+        t: &RecipeTranslation,
+    ) -> Result<(), DbError> {
         sqlx::query(
             "INSERT INTO recipe_translations (recipe_id, lang, title, description, ingredients, instructions, tags, origin, source_updated_at, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -92,19 +100,27 @@ impl Db {
 
     /// Languages a recipe has translations for.
     pub async fn translation_langs(&self, recipe_id: &str) -> Result<Vec<String>, DbError> {
-        Ok(sqlx::query_scalar("SELECT lang FROM recipe_translations WHERE recipe_id = ? ORDER BY lang")
-            .bind(recipe_id)
-            .fetch_all(self.pool())
-            .await?)
+        Ok(sqlx::query_scalar(
+            "SELECT lang FROM recipe_translations WHERE recipe_id = ? ORDER BY lang",
+        )
+        .bind(recipe_id)
+        .fetch_all(self.pool())
+        .await?)
     }
 
     /// Localized labels for the given canonical ids (only those stored).
-    pub async fn get_terms(&self, canonical_ids: &[String], lang: &str) -> Result<HashMap<String, String>, DbError> {
+    pub async fn get_terms(
+        &self,
+        canonical_ids: &[String],
+        lang: &str,
+    ) -> Result<HashMap<String, String>, DbError> {
         if canonical_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT canonical_id, label FROM canonical_terms WHERE lang = ");
-        qb.push_bind(lang.to_string()).push(" AND canonical_id IN (");
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("SELECT canonical_id, label FROM canonical_terms WHERE lang = ");
+        qb.push_bind(lang.to_string())
+            .push(" AND canonical_id IN (");
         let mut sep = qb.separated(", ");
         for id in canonical_ids {
             sep.push_bind(id.clone());
@@ -115,7 +131,12 @@ impl Db {
     }
 
     /// Insert or replace labels for `lang`.
-    pub async fn upsert_terms(&self, lang: &str, labels: &[(String, String)], origin: TranslationOrigin) -> Result<(), DbError> {
+    pub async fn upsert_terms(
+        &self,
+        lang: &str,
+        labels: &[(String, String)],
+        origin: TranslationOrigin,
+    ) -> Result<(), DbError> {
         if labels.is_empty() {
             return Ok(());
         }
@@ -137,11 +158,16 @@ impl Db {
     }
 
     /// Recipes whose source language is unknown (oldest first), fully loaded.
-    pub async fn recipes_without_language(&self, limit: u32) -> Result<Vec<recipe_core::Recipe>, DbError> {
-        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM recipes WHERE language IS NULL ORDER BY rowid LIMIT ?")
-            .bind(i64::from(limit))
-            .fetch_all(self.pool())
-            .await?;
+    pub async fn recipes_without_language(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<recipe_core::Recipe>, DbError> {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM recipes WHERE language IS NULL ORDER BY rowid LIMIT ?",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(self.pool())
+        .await?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(r) = self.get_recipe(&id).await? {

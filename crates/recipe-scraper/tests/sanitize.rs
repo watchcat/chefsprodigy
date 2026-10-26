@@ -12,7 +12,15 @@ fn strips_noise_tags_and_converts_to_markdown() {
     assert!(md.contains("# Garlic Noodles"), "{md}");
     assert!(md.contains("200 g noodles"), "{md}");
     assert!(md.contains("**2**"), "{md}");
-    for noise in ["secret", ".x{}", "Menu", "Site header", "Footer", "icon", "Ad"] {
+    for noise in [
+        "secret",
+        ".x{}",
+        "Menu",
+        "Site header",
+        "Footer",
+        "icon",
+        "Ad",
+    ] {
         assert!(!md.contains(noise), "noise {noise:?} leaked into: {md}");
     }
 }

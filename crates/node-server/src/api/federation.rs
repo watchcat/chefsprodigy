@@ -31,7 +31,10 @@ async fn manifest(State(state): State<AppState>) -> Result<Json<Manifest>, ApiEr
     }))
 }
 
-async fn public_recipe(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Recipe>, ApiError> {
+async fn public_recipe(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Recipe>, ApiError> {
     state
         .db()
         .get_public_recipe(&id)

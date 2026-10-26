@@ -45,7 +45,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status();
         if matches!(self, Self::Unauthorized(_)) {
-            return (status, [(axum::http::header::WWW_AUTHENTICATE, "Bearer")], Json(json!({ "error": "missing or invalid bearer token" })))
+            return (
+                status,
+                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                Json(json!({ "error": "missing or invalid bearer token" })),
+            )
                 .into_response();
         }
         let message = match &self {
@@ -53,7 +57,10 @@ impl IntoResponse for ApiError {
                 tracing::warn!(status = %status, error = %m, "upstream failure");
                 m.clone()
             }
-            Self::NotFound(m) | Self::BadRequest(m) | Self::Unauthorized(m) | Self::Unprocessable(m) => m.clone(),
+            Self::NotFound(m)
+            | Self::BadRequest(m)
+            | Self::Unauthorized(m)
+            | Self::Unprocessable(m) => m.clone(),
             Self::Internal(e) => {
                 tracing::error!(error = ?e, "internal error");
                 "internal server error".to_string()
@@ -72,14 +79,21 @@ impl From<DbError> for ApiError {
 impl From<ScraperError> for ApiError {
     fn from(e: ScraperError) -> Self {
         match e {
-            ScraperError::Http(inner) => Self::BadGateway(format!("could not fetch source: {inner}")),
-            ScraperError::LlmUnavailable | ScraperError::ModelCannotSeeImages(_) => Self::ServiceUnavailable(e.to_string()),
+            ScraperError::Http(inner) => {
+                Self::BadGateway(format!("could not fetch source: {inner}"))
+            }
+            ScraperError::LlmUnavailable | ScraperError::ModelCannotSeeImages(_) => {
+                Self::ServiceUnavailable(e.to_string())
+            }
             ScraperError::NoRecipeInPhotos(_) => Self::Unprocessable(e.to_string()),
             ScraperError::Llm(m) => Self::BadGateway(format!("llm failure: {m}")),
-            ScraperError::TranslationIncomplete(m) => Self::BadGateway(format!("translation failed: {m}")),
-            ScraperError::EmptyInput | ScraperError::InvalidBackup(_) | ScraperError::Zip(_) | ScraperError::Image(_) => {
-                Self::BadRequest(e.to_string())
+            ScraperError::TranslationIncomplete(m) => {
+                Self::BadGateway(format!("translation failed: {m}"))
             }
+            ScraperError::EmptyInput
+            | ScraperError::InvalidBackup(_)
+            | ScraperError::Zip(_)
+            | ScraperError::Image(_) => Self::BadRequest(e.to_string()),
             ScraperError::Json(_) | ScraperError::Io(_) => Self::Internal(e.into()),
         }
     }

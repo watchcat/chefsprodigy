@@ -56,14 +56,19 @@ impl RecipeMcpServer {
         &self,
         Parameters(params): Parameters<GetRecipeDetailsParams>,
     ) -> Result<Json<LocalizedRecipe>, McpToolError> {
-        get_details(&self.db, &self.translations, params).await.map(Json)
+        get_details(&self.db, &self.translations, params)
+            .await
+            .map(Json)
     }
 
     #[tool(
         name = "import_recipe",
         description = "Import and normalize a recipe from a web page URL or from raw unstructured text, then save it to the node. Returns the stored recipe."
     )]
-    async fn import_recipe(&self, Parameters(params): Parameters<ImportRecipeParams>) -> Result<Json<Recipe>, McpToolError> {
+    async fn import_recipe(
+        &self,
+        Parameters(params): Parameters<ImportRecipeParams>,
+    ) -> Result<Json<Recipe>, McpToolError> {
         import(&self.imports, params).await.map(Json)
     }
 
@@ -83,7 +88,10 @@ impl RecipeMcpServer {
 impl ServerHandler for RecipeMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("recipe-node", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(
+                "recipe-node",
+                env!("CARGO_PKG_VERSION"),
+            ))
             .with_instructions(INSTRUCTIONS)
     }
 }

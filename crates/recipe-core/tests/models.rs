@@ -3,15 +3,29 @@ use schemars::schema_for;
 
 #[test]
 fn measurement_unit_serializes_as_snake_case() {
-    assert_eq!(serde_json::to_string(&MeasurementUnit::ToTaste).unwrap(), "\"to_taste\"");
+    assert_eq!(
+        serde_json::to_string(&MeasurementUnit::ToTaste).unwrap(),
+        "\"to_taste\""
+    );
     assert_eq!(serde_json::to_string(&MeasurementUnit::G).unwrap(), "\"g\"");
-    assert_eq!(serde_json::to_string(&MeasurementUnit::Ml).unwrap(), "\"ml\"");
-    assert_eq!(serde_json::to_string(&MeasurementUnit::Pcs).unwrap(), "\"pcs\"");
+    assert_eq!(
+        serde_json::to_string(&MeasurementUnit::Ml).unwrap(),
+        "\"ml\""
+    );
+    assert_eq!(
+        serde_json::to_string(&MeasurementUnit::Pcs).unwrap(),
+        "\"pcs\""
+    );
 }
 
 #[test]
 fn measurement_unit_round_trips_through_db_string() {
-    for unit in [MeasurementUnit::G, MeasurementUnit::Ml, MeasurementUnit::Pcs, MeasurementUnit::ToTaste] {
+    for unit in [
+        MeasurementUnit::G,
+        MeasurementUnit::Ml,
+        MeasurementUnit::Pcs,
+        MeasurementUnit::ToTaste,
+    ] {
         let s = unit.as_str();
         assert_eq!(s.parse::<MeasurementUnit>().unwrap(), unit);
     }
@@ -32,5 +46,8 @@ fn recipe_json_schema_exposes_ingredient_doc_comments() {
     let schema = schema_for!(Recipe);
     let text = serde_json::to_string(&schema).unwrap();
     assert!(text.contains("canonical_id"));
-    assert!(text.contains("Tier 3"), "doc comments must be injected into schema for the LLM");
+    assert!(
+        text.contains("Tier 3"),
+        "doc comments must be injected into schema for the LLM"
+    );
 }

@@ -52,18 +52,40 @@ fn reads_mealie_v1_database_dump_with_joined_tables() {
     let recipes = read_mealie_backup(Cursor::new(zip)).unwrap();
     assert_eq!(recipes.len(), 2);
 
-    let pho = recipes.iter().find(|r| r.recipe.title == "Beef Pho").unwrap();
+    let pho = recipes
+        .iter()
+        .find(|r| r.recipe.title == "Beef Pho")
+        .unwrap();
     assert_eq!(pho.recipe.servings, 4);
     assert_eq!(pho.recipe.prep_time_minutes, Some(30));
     assert_eq!(pho.recipe.cook_time_minutes, Some(360));
     assert_eq!(pho.recipe.tags, vec!["soup", "vietnamese"]);
-    assert_eq!(pho.recipe.instructions.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), vec!["Roast bones.", "Simmer for 6 hours."]);
+    assert_eq!(
+        pho.recipe
+            .instructions
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Roast bones.", "Simmer for 6 hours."]
+    );
     assert_eq!(pho.recipe.instructions[1].timer_seconds, Some(21600));
     assert_eq!(pho.recipe.ingredients.len(), 2);
-    assert_eq!(pho.recipe.ingredients[0].raw_text, "1 kg beef bones", "position ordering, composed from quantity+unit+food");
-    assert_eq!((pho.recipe.ingredients[0].metric_amount, pho.recipe.ingredients[0].unit), (Some(1000.0), MeasurementUnit::G));
+    assert_eq!(
+        pho.recipe.ingredients[0].raw_text, "1 kg beef bones",
+        "position ordering, composed from quantity+unit+food"
+    );
+    assert_eq!(
+        (
+            pho.recipe.ingredients[0].metric_amount,
+            pho.recipe.ingredients[0].unit
+        ),
+        (Some(1000.0), MeasurementUnit::G)
+    );
     assert_eq!(pho.recipe.ingredients[0].canonical_id, "beef_bones");
-    assert_eq!(pho.recipe.ingredients[1].raw_text, "3 star anise", "original_text preferred when present");
+    assert_eq!(
+        pho.recipe.ingredients[1].raw_text, "3 star anise",
+        "original_text preferred when present"
+    );
     assert!(pho.image.is_some(), "image bytes attached");
     assert_eq!(pho.source_id.as_deref(), Some("r-1"));
 
@@ -87,7 +109,10 @@ fn reads_per_recipe_json_exports() {
         "image": "original.webp"
     });
     let zip = build_zip(&[
-        ("recipes/cheese-omelette/cheese-omelette.json", recipe.to_string().as_bytes()),
+        (
+            "recipes/cheese-omelette/cheese-omelette.json",
+            recipe.to_string().as_bytes(),
+        ),
         ("recipes/cheese-omelette/images/original.png", &tiny_png()),
         ("README.txt", b"not a recipe"),
     ]);
@@ -101,9 +126,21 @@ fn reads_per_recipe_json_exports() {
     assert_eq!(r.recipe.cook_time_minutes, Some(5));
     assert_eq!(r.recipe.tags, vec!["breakfast"]);
     assert_eq!(r.recipe.ingredients[0].raw_text, "3 large egg");
-    assert_eq!((r.recipe.ingredients[0].metric_amount, r.recipe.ingredients[0].unit), (Some(3.0), MeasurementUnit::Pcs));
+    assert_eq!(
+        (
+            r.recipe.ingredients[0].metric_amount,
+            r.recipe.ingredients[0].unit
+        ),
+        (Some(3.0), MeasurementUnit::Pcs)
+    );
     assert_eq!(r.recipe.ingredients[1].raw_text, "50g cheddar");
-    assert_eq!((r.recipe.ingredients[1].metric_amount, r.recipe.ingredients[1].unit), (Some(50.0), MeasurementUnit::G));
+    assert_eq!(
+        (
+            r.recipe.ingredients[1].metric_amount,
+            r.recipe.ingredients[1].unit
+        ),
+        (Some(50.0), MeasurementUnit::G)
+    );
     assert_eq!(r.recipe.instructions[1].timer_seconds, Some(180));
     assert!(r.image.is_some());
 }

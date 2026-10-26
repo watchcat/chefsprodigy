@@ -5,7 +5,10 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
-use recipe_core::{LocalizedRecipe, Recipe, RecipeInput, RecipeSummary, SearchQuery, TranslationInput, normalize_lang};
+use recipe_core::{
+    LocalizedRecipe, Recipe, RecipeInput, RecipeSummary, SearchQuery, TranslationInput,
+    normalize_lang,
+};
 use recipe_db::recipes::{DEFAULT_LIMIT, MAX_LIMIT};
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +23,14 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/recipes", get(list).post(create))
         .route("/recipes/{id}", get(get_one).put(update).delete(delete))
-        .route("/recipes/{id}/image", put(upload_image).layer(DefaultBodyLimit::max(MAX_IMAGE_BYTES)))
-        .route("/recipes/{id}/translations/{lang}", put(put_translation).delete(delete_translation))
+        .route(
+            "/recipes/{id}/image",
+            put(upload_image).layer(DefaultBodyLimit::max(MAX_IMAGE_BYTES)),
+        )
+        .route(
+            "/recipes/{id}/translations/{lang}",
+            put(put_translation).delete(delete_translation),
+        )
 }
 
 /// Query-string parameters for `GET /recipes`.
@@ -55,7 +64,10 @@ pub struct GetParams {
 
 /// Resolve the display language from `?lang=` or the `Accept-Language` header.
 /// `Ok(None)` means "show the source language".
-pub fn display_language(param: Option<&str>, headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+pub fn display_language(
+    param: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Option<String>, ApiError> {
     if let Some(p) = param.map(str::trim).filter(|p| !p.is_empty()) {
         if p.eq_ignore_ascii_case("source") {
             return Ok(None);
@@ -64,7 +76,10 @@ pub fn display_language(param: Option<&str>, headers: &HeaderMap) -> Result<Opti
             .map(Some)
             .ok_or_else(|| ApiError::BadRequest(format!("invalid language code: {p}")));
     }
-    let accept = headers.get(header::ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let accept = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     Ok(accept
         .split(',')
         .map(|part| part.split(';').next().unwrap_or("").trim())
@@ -91,11 +106,23 @@ async fn list(
         public_only: !owner,
         ..Default::default()
     };
-    let (items, total) = tokio::try_join!(state.db().search_recipes(&query), state.db().count_recipes(&query))?;
-    Ok(Json(ListResponse { items, limit, offset, total }))
+    let (items, total) = tokio::try_join!(
+        state.db().search_recipes(&query),
+        state.db().count_recipes(&query)
+    )?;
+    Ok(Json(ListResponse {
+        items,
+        limit,
+        offset,
+        total,
+    }))
 }
 
-async fn create(State(state): State<AppState>, _owner: RequireOwner, JsonBody(input): JsonBody<RecipeInput>) -> Result<Response, ApiError> {
+async fn create(
+    State(state): State<AppState>,
+    _owner: RequireOwner,
+    JsonBody(input): JsonBody<RecipeInput>,
+) -> Result<Response, ApiError> {
     let recipe = state.db().create_recipe(input).await?;
     Ok((StatusCode::CREATED, Json(recipe)).into_response())
 }
@@ -115,7 +142,10 @@ async fn get_one(
         .ok_or_else(|| ApiError::not_found("recipe not found"))?;
     let lang = display_language(params.lang.as_deref(), &headers)?;
     // Anonymous readers get cached translations only; live model calls are for the owner.
-    let mut localized = state.translations().localize_with(recipe, lang.as_deref(), owner).await?;
+    let mut localized = state
+        .translations()
+        .localize_with(recipe, lang.as_deref(), owner)
+        .await?;
     if let Some(target) = params.servings {
         localized.recipe = localized.recipe.scaled_to(target);
     }
@@ -156,11 +186,19 @@ async fn update(
     Path(id): Path<String>,
     JsonBody(input): JsonBody<RecipeInput>,
 ) -> Result<Json<Recipe>, ApiError> {
-    let recipe = state.db().update_recipe(&id, input).await?.ok_or_else(|| ApiError::not_found("recipe not found"))?;
+    let recipe = state
+        .db()
+        .update_recipe(&id, input)
+        .await?
+        .ok_or_else(|| ApiError::not_found("recipe not found"))?;
     Ok(Json(recipe))
 }
 
-async fn delete(State(state): State<AppState>, _owner: RequireOwner, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn delete(
+    State(state): State<AppState>,
+    _owner: RequireOwner,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
     if state.db().delete_recipe(&id).await? {
         if let Err(e) = state.images().delete_cover(&id) {
             tracing::warn!(error = %e, %id, "recipe deleted but its cover file could not be removed");
@@ -179,13 +217,25 @@ async fn upload_image(
     mut multipart: Multipart,
 ) -> Result<Json<Recipe>, ApiError> {
     let mut image: Option<Vec<u8>> = None;
-    while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::BadRequest(e.body_text()))? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::BadRequest(e.body_text()))?
+    {
         if field.file_name().is_some() || matches!(field.name(), Some("file" | "image")) {
-            image = Some(field.bytes().await.map_err(|e| ApiError::BadRequest(e.body_text()))?.to_vec());
+            image = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| ApiError::BadRequest(e.body_text()))?
+                    .to_vec(),
+            );
             break;
         }
     }
-    let image = image.ok_or_else(|| ApiError::BadRequest("multipart upload must contain an image file field".to_string()))?;
+    let image = image.ok_or_else(|| {
+        ApiError::BadRequest("multipart upload must contain an image file field".to_string())
+    })?;
     state
         .imports()
         .set_cover(&id, image)

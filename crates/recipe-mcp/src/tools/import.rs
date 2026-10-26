@@ -22,16 +22,33 @@ pub struct ImportRecipeParams {
     pub photo_paths: Option<Vec<String>>,
 }
 
-pub async fn import(service: &ImportService, p: ImportRecipeParams) -> Result<Recipe, McpToolError> {
-    let url = p.source_url.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let text = p.raw_text.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let paths: Vec<&str> = p.photo_paths.iter().flatten().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+pub async fn import(
+    service: &ImportService,
+    p: ImportRecipeParams,
+) -> Result<Recipe, McpToolError> {
+    let url = p
+        .source_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let text = p
+        .raw_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let paths: Vec<&str> = p
+        .photo_paths
+        .iter()
+        .flatten()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     if !paths.is_empty() {
         let mut photos = Vec::with_capacity(paths.len());
         for path in paths {
-            let bytes = tokio::fs::read(path)
-                .await
-                .map_err(|e| McpToolError::InvalidInput(format!("cannot read photo {path}: {e}")))?;
+            let bytes = tokio::fs::read(path).await.map_err(|e| {
+                McpToolError::InvalidInput(format!("cannot read photo {path}: {e}"))
+            })?;
             photos.push(bytes);
         }
         return Ok(service.import_photos(photos, p.is_public).await?);
@@ -39,6 +56,8 @@ pub async fn import(service: &ImportService, p: ImportRecipeParams) -> Result<Re
     match (url, text) {
         (Some(url), _) => Ok(service.import_url(url, p.is_public).await?),
         (None, Some(text)) => Ok(service.import_text(text, None, p.is_public).await?),
-        (None, None) => Err(McpToolError::InvalidInput("provide source_url, raw_text, or photo_paths".to_string())),
+        (None, None) => Err(McpToolError::InvalidInput(
+            "provide source_url, raw_text, or photo_paths".to_string(),
+        )),
     }
 }

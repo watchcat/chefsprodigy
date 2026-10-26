@@ -146,7 +146,12 @@ impl Recipe {
         let stale = t.is_stale_for(self);
         LocalizedRecipe {
             recipe,
-            translation: Some(TranslationInfo { lang: t.lang.clone(), origin: t.origin, stale, translated_at: t.updated_at.clone() }),
+            translation: Some(TranslationInfo {
+                lang: t.lang.clone(),
+                origin: t.origin,
+                stale,
+                translated_at: t.updated_at.clone(),
+            }),
         }
     }
 
@@ -172,9 +177,14 @@ impl Recipe {
 /// Returns None for anything that is not a 2–3 letter code or a known name.
 pub fn normalize_lang(input: &str) -> Option<String> {
     let s = input.trim().to_lowercase();
-    let well_formed_tag = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let well_formed_tag = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     let primary = s.split(['-', '_']).next().unwrap_or("");
-    if well_formed_tag && (2..=3).contains(&primary.len()) && primary.chars().all(|c| c.is_ascii_lowercase()) {
+    if well_formed_tag
+        && (2..=3).contains(&primary.len())
+        && primary.chars().all(|c| c.is_ascii_lowercase())
+    {
         return Some(primary.to_string());
     }
     let named = match s.as_str() {
@@ -235,7 +245,9 @@ impl std::str::FromStr for TranslationOrigin {
         match s {
             "llm" => Ok(Self::Llm),
             "human" => Ok(Self::Human),
-            other => Err(crate::CoreError::UnknownTranslationOrigin(other.to_string())),
+            other => Err(crate::CoreError::UnknownTranslationOrigin(
+                other.to_string(),
+            )),
         }
     }
 }
@@ -303,7 +315,10 @@ pub struct LocalizedRecipe {
 impl LocalizedRecipe {
     /// The recipe in its source language.
     pub fn source(recipe: Recipe) -> Self {
-        Self { recipe, translation: None }
+        Self {
+            recipe,
+            translation: None,
+        }
     }
 }
 

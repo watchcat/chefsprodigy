@@ -19,7 +19,11 @@ pub struct GetRecipeDetailsParams {
     pub language: Option<String>,
 }
 
-pub async fn get_details(db: &Db, translations: &TranslationService, p: GetRecipeDetailsParams) -> Result<LocalizedRecipe, McpToolError> {
+pub async fn get_details(
+    db: &Db,
+    translations: &TranslationService,
+    p: GetRecipeDetailsParams,
+) -> Result<LocalizedRecipe, McpToolError> {
     let recipe = db
         .get_recipe(&p.recipe_id)
         .await?

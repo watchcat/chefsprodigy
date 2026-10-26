@@ -32,5 +32,7 @@ async fn shopping_list(
     if params.language.is_none() {
         params.language = display_language(q.lang.as_deref(), &headers)?;
     }
-    Ok(Json(build_with_visibility(state.db(), &state.translations(), params, !owner, owner).await?))
+    Ok(Json(
+        build_with_visibility(state.db(), &state.translations(), params, !owner, owner).await?,
+    ))
 }

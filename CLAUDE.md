@@ -49,6 +49,7 @@ Strictly adhere to the following modular Workspace layout:
 Always use these commands to verify your changes:
 - **Check compilation across workspace:** `cargo check --workspace --all-targets`
 - **Strict Linter:** `cargo clippy --workspace --all-targets -- -D warnings`
+- **Formatting:** `cargo fmt --all -- --check` (rustfmt defaults, no config file); fix with `cargo fmt --all`.
 - **Run tests:** `cargo test --workspace`
 - **Run node as HTTP server:** `cargo run -p node-server -- serve --port 8080`
 - **Run node in local MCP (stdio) mode:** `cargo run -p node-server -- mcp-stdio`

@@ -16,10 +16,17 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 async fn app(api_key: Option<&str>) -> Router {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir: PathBuf = std::env::temp_dir().join(format!("node-mcp-test-{}-{n}", std::process::id()));
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("node-mcp-test-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = Db::open(dir.join("recipes.db")).await.unwrap();
-    let mut state = AppState::new(db, NodeInfo { author_did: None, chef_name: "T".into() });
+    let mut state = AppState::new(
+        db,
+        NodeInfo {
+            author_did: None,
+            chef_name: "T".into(),
+        },
+    );
     if let Some(k) = api_key {
         state = state.with_mcp_api_key(k);
     }
@@ -43,7 +50,11 @@ async fn post_mcp(app: &Router, auth: Option<&str>) -> (StatusCode, String) {
     if let Some(a) = auth {
         req = req.header(header::AUTHORIZATION, a);
     }
-    let res = app.clone().oneshot(req.body(Body::from(initialize_body())).unwrap()).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(req.body(Body::from(initialize_body())).unwrap())
+        .await
+        .unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())

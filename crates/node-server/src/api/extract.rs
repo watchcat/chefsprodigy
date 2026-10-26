@@ -33,7 +33,8 @@ where
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let axum::extract::Query(value) = axum::extract::Query::<T>::from_request_parts(parts, state).await?;
+        let axum::extract::Query(value) =
+            axum::extract::Query::<T>::from_request_parts(parts, state).await?;
         Ok(Self(value))
     }
 }

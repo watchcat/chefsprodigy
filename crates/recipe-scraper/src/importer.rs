@@ -9,7 +9,9 @@ use crate::ScraperError;
 use crate::images::NormalizedPhoto;
 use crate::jsonld::{SchemaOrgRecipe, parse_schema_org};
 use crate::langdetect::detect_language;
-use crate::llm::{ExtractedRecipeDraft, PhotoExtraction, RecipeExtractor, TranslationReply, TranslationRequest};
+use crate::llm::{
+    ExtractedRecipeDraft, PhotoExtraction, RecipeExtractor, TranslationReply, TranslationRequest,
+};
 use crate::sanitize::html_to_markdown;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -51,12 +53,23 @@ impl RecipeImporter {
 
     /// Fetch `url` and import it.
     pub async fn import_url(&self, url: &str) -> Result<ImportResult, ScraperError> {
-        let html = self.http.get(url).send().await?.error_for_status()?.text().await?;
+        let html = self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
         self.import_html(&html, Some(url)).await
     }
 
     /// Import already-fetched HTML: JSON-LD first, Markdown + LLM otherwise.
-    pub async fn import_html(&self, html: &str, origin_url: Option<&str>) -> Result<ImportResult, ScraperError> {
+    pub async fn import_html(
+        &self,
+        html: &str,
+        origin_url: Option<&str>,
+    ) -> Result<ImportResult, ScraperError> {
         if let Some(schema) = parse_schema_org(html).filter(|s| !s.name.is_empty()) {
             tracing::debug!(name = %schema.name, "recipe found via JSON-LD");
             return self.import_schema_org(schema, origin_url).await;
@@ -67,7 +80,11 @@ impl RecipeImporter {
     }
 
     /// Import unstructured text (captions, chat messages, OCR output).
-    pub async fn import_text(&self, text: &str, origin_url: Option<&str>) -> Result<ImportResult, ScraperError> {
+    pub async fn import_text(
+        &self,
+        text: &str,
+        origin_url: Option<&str>,
+    ) -> Result<ImportResult, ScraperError> {
         let text = text.trim();
         if text.is_empty() {
             return Err(ScraperError::EmptyInput);
@@ -81,9 +98,14 @@ impl RecipeImporter {
     }
 
     /// Read a recipe from normalized photos (vision model).
-    pub async fn extract_photos(&self, photos: &[NormalizedPhoto]) -> Result<PhotoExtraction, ScraperError> {
+    pub async fn extract_photos(
+        &self,
+        photos: &[NormalizedPhoto],
+    ) -> Result<PhotoExtraction, ScraperError> {
         if !self.extractor.supports_images() {
-            return Err(ScraperError::ModelCannotSeeImages("the configured extractor".to_string()));
+            return Err(ScraperError::ModelCannotSeeImages(
+                "the configured extractor".to_string(),
+            ));
         }
         self.extractor.extract_from_photos(photos).await
     }
@@ -94,7 +116,10 @@ impl RecipeImporter {
     }
 
     /// Translate recipe wording with the configured model.
-    pub async fn translate(&self, req: &TranslationRequest) -> Result<TranslationReply, ScraperError> {
+    pub async fn translate(
+        &self,
+        req: &TranslationRequest,
+    ) -> Result<TranslationReply, ScraperError> {
         self.extractor.translate_recipe(req).await
     }
 
@@ -104,46 +129,75 @@ impl RecipeImporter {
     }
 
     /// Localized labels for canonical ingredient ids.
-    pub async fn translate_terms(&self, ids: &[String], lang: &str) -> Result<std::collections::HashMap<String, String>, ScraperError> {
+    pub async fn translate_terms(
+        &self,
+        ids: &[String],
+        lang: &str,
+    ) -> Result<std::collections::HashMap<String, String>, ScraperError> {
         self.extractor.translate_terms(ids, lang).await
     }
 
     /// Download bytes (used for cover images).
     pub async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ScraperError> {
-        Ok(self.http.get(url).send().await?.error_for_status()?.bytes().await?.to_vec())
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?
+            .to_vec())
     }
 
-    async fn import_schema_org(&self, s: SchemaOrgRecipe, origin_url: Option<&str>) -> Result<ImportResult, ScraperError> {
+    async fn import_schema_org(
+        &self,
+        s: SchemaOrgRecipe,
+        origin_url: Option<&str>,
+    ) -> Result<ImportResult, ScraperError> {
         let ingredients = self.extractor.normalize_ingredients(&s.ingredients).await?;
         let (prep, cook) = match (s.prep_minutes, s.cook_minutes, s.total_minutes) {
             (None, None, Some(total)) => (None, Some(total)),
             (p, c, _) => (p, c),
         };
         let mut recipe = RecipeInput {
-                title: s.name,
-                description: s.description,
-                servings: s.servings.unwrap_or(DEFAULT_SERVINGS),
-                prep_time_minutes: prep,
-                cook_time_minutes: cook,
-                ingredients,
-                instructions: build_steps(s.instructions.iter().map(|t| (t.as_str(), None))),
-                tags: dedup_tags(s.tags),
-                image_path: None,
-                origin_url: origin_url.map(str::to_string),
-                author_did: None,
-                is_public: false,
-                language: s.language.clone(),
-            };
+            title: s.name,
+            description: s.description,
+            servings: s.servings.unwrap_or(DEFAULT_SERVINGS),
+            prep_time_minutes: prep,
+            cook_time_minutes: cook,
+            ingredients,
+            instructions: build_steps(s.instructions.iter().map(|t| (t.as_str(), None))),
+            tags: dedup_tags(s.tags),
+            image_path: None,
+            origin_url: origin_url.map(str::to_string),
+            author_did: None,
+            is_public: false,
+            language: s.language.clone(),
+        };
         fill_language(&mut recipe);
-        Ok(ImportResult { recipe, image_url: s.image_url.as_deref().and_then(|img| resolve_url(img, origin_url)) })
+        Ok(ImportResult {
+            recipe,
+            image_url: s
+                .image_url
+                .as_deref()
+                .and_then(|img| resolve_url(img, origin_url)),
+        })
     }
 
-    async fn import_markdown(&self, markdown: &str, origin_url: Option<&str>) -> Result<ImportResult, ScraperError> {
+    async fn import_markdown(
+        &self,
+        markdown: &str,
+        origin_url: Option<&str>,
+    ) -> Result<ImportResult, ScraperError> {
         if markdown.trim().is_empty() {
             return Err(ScraperError::EmptyInput);
         }
         let draft: ExtractedRecipeDraft = self.extractor.extract_recipe(markdown).await?;
-        Ok(ImportResult { recipe: input_from_draft(draft, origin_url), image_url: None })
+        Ok(ImportResult {
+            recipe: input_from_draft(draft, origin_url),
+            image_url: None,
+        })
     }
 }
 
@@ -153,24 +207,39 @@ pub fn input_from_draft(draft: ExtractedRecipeDraft, origin_url: Option<&str>) -
     let mut input = RecipeInput {
         title: draft.title,
         description: draft.description.filter(|d| !d.trim().is_empty()),
-        servings: draft.servings.filter(|s| *s > 0).unwrap_or(DEFAULT_SERVINGS),
+        servings: draft
+            .servings
+            .filter(|s| *s > 0)
+            .unwrap_or(DEFAULT_SERVINGS),
         prep_time_minutes: draft.prep_time_minutes,
         cook_time_minutes: draft.cook_time_minutes,
         ingredients: draft.ingredients,
-        instructions: build_steps(draft.instructions.iter().map(|s| (s.text.as_str(), s.timer_seconds))),
+        instructions: build_steps(
+            draft
+                .instructions
+                .iter()
+                .map(|s| (s.text.as_str(), s.timer_seconds)),
+        ),
         tags: dedup_tags(draft.tags),
         image_path: None,
         origin_url: origin_url.map(str::to_string),
         author_did: None,
         is_public: false,
-        language: draft.language.as_deref().and_then(recipe_core::normalize_lang),
+        language: draft
+            .language
+            .as_deref()
+            .and_then(recipe_core::normalize_lang),
     };
     fill_language(&mut input);
     input
 }
 
 /// Text sample used for language detection: title, ingredient lines and steps.
-pub fn language_sample(title: &str, ingredients: impl Iterator<Item = String>, steps: impl Iterator<Item = String>) -> String {
+pub fn language_sample(
+    title: &str,
+    ingredients: impl Iterator<Item = String>,
+    steps: impl Iterator<Item = String>,
+) -> String {
     let mut parts = vec![title.to_string()];
     parts.extend(ingredients.take(12));
     parts.extend(steps.take(6));
@@ -201,7 +270,9 @@ pub fn resolve_url(candidate: &str, base: Option<&str>) -> Option<String> {
 }
 
 /// Renumber steps from 1 and fill missing timers from the step text.
-pub fn build_steps<'a>(steps: impl Iterator<Item = (&'a str, Option<u32>)>) -> Vec<InstructionStep> {
+pub fn build_steps<'a>(
+    steps: impl Iterator<Item = (&'a str, Option<u32>)>,
+) -> Vec<InstructionStep> {
     steps
         .filter(|(t, _)| !t.trim().is_empty())
         .enumerate()
@@ -230,13 +301,19 @@ pub fn extract_timer_seconds(text: &str) -> Option<u32> {
     let words: Vec<&str> = text.split_whitespace().collect();
     for (i, w) in words.iter().enumerate() {
         let num_tok = w.split(['-', '–', '/']).next_back().unwrap_or(w);
-        let Ok(n) = num_tok.trim_matches(|c: char| !c.is_ascii_digit() && c != '.').parse::<f32>() else {
+        let Ok(n) = num_tok
+            .trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+            .parse::<f32>()
+        else {
             continue;
         };
         if n <= 0.0 {
             continue;
         }
-        let unit = words.get(i + 1)?.trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
+        let unit = words
+            .get(i + 1)?
+            .trim_matches(|c: char| !c.is_alphabetic())
+            .to_lowercase();
         let secs = match unit.as_str() {
             "second" | "seconds" | "sec" | "secs" | "s" => 1.0,
             "minute" | "minutes" | "min" | "mins" | "m" => 60.0,

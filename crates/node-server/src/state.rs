@@ -116,7 +116,11 @@ impl AppState {
 
     /// Import pipeline bound to this node's database and image store.
     pub fn imports(&self) -> ImportService {
-        ImportService::new(self.inner.db.clone(), self.inner.importer.clone(), self.inner.images.clone())
+        ImportService::new(
+            self.inner.db.clone(),
+            self.inner.importer.clone(),
+            self.inner.images.clone(),
+        )
     }
 
     /// Translation service bound to this node's database and model.
@@ -126,6 +130,10 @@ impl AppState {
 
     /// A fresh MCP server instance sharing this node's services.
     pub fn mcp_server(&self) -> RecipeMcpServer {
-        RecipeMcpServer::new(self.inner.db.clone(), self.inner.importer.clone(), self.inner.images.clone())
+        RecipeMcpServer::new(
+            self.inner.db.clone(),
+            self.inner.importer.clone(),
+            self.inner.images.clone(),
+        )
     }
 }

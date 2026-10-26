@@ -20,7 +20,11 @@ pub const MAX_WIDTH: u32 = 1200;
 /// aspect ratio, and return WebP bytes.
 pub fn to_webp_cover(bytes: &[u8]) -> Result<Vec<u8>, ScraperError> {
     let img = image::load_from_memory(bytes)?;
-    let img = if img.width() > MAX_WIDTH { img.resize(MAX_WIDTH, u32::MAX, FilterType::Lanczos3) } else { img };
+    let img = if img.width() > MAX_WIDTH {
+        img.resize(MAX_WIDTH, u32::MAX, FilterType::Lanczos3)
+    } else {
+        img
+    };
     let mut out = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(img.to_rgba8()).write_to(&mut out, ImageFormat::WebP)?;
     Ok(out.into_inner())
@@ -64,7 +68,10 @@ impl ImageStore {
     /// anything that is not a plain `.webp` basename, which blocks traversal.
     pub fn file_path(&self, name: &str) -> Option<std::path::PathBuf> {
         let stem = name.strip_suffix(".webp")?;
-        let valid = !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        let valid = !stem.is_empty()
+            && stem
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
         valid.then(|| self.dir.join(name))
     }
 }
@@ -100,5 +107,10 @@ pub fn normalize_photo(bytes: &[u8]) -> Result<NormalizedPhoto, ScraperError> {
     let rgb = DynamicImage::ImageRgb8(img.to_rgb8());
     let mut out = Cursor::new(Vec::new());
     rgb.write_with_encoder(JpegEncoder::new_with_quality(&mut out, PHOTO_JPEG_QUALITY))?;
-    Ok(NormalizedPhoto { bytes: out.into_inner(), width: rgb.width(), height: rgb.height(), media_type: "image/jpeg" })
+    Ok(NormalizedPhoto {
+        bytes: out.into_inner(),
+        width: rgb.width(),
+        height: rgb.height(),
+        media_type: "image/jpeg",
+    })
 }

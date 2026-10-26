@@ -52,9 +52,11 @@ fn ingredient_token(item: &IngredientItem) -> String {
 
 fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        // Writing to a String cannot fail.
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            // Writing to a String cannot fail.
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }

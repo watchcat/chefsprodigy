@@ -29,7 +29,9 @@ impl From<ScraperError> for McpToolError {
     fn from(e: ScraperError) -> Self {
         match e {
             ScraperError::Http(inner) => Self::Fetch(inner.to_string()),
-            ScraperError::LlmUnavailable | ScraperError::ModelCannotSeeImages(_) => Self::Unavailable(e.to_string()),
+            ScraperError::LlmUnavailable | ScraperError::ModelCannotSeeImages(_) => {
+                Self::Unavailable(e.to_string())
+            }
             ScraperError::EmptyInput => Self::InvalidInput(e.to_string()),
             ScraperError::NoRecipeInPhotos(_) => Self::Import(e.to_string()),
             other => Self::Import(other.to_string()),

@@ -23,15 +23,26 @@ pub async fn check(host: &str, port: u16, timeout: Duration) -> anyhow::Result<(
 }
 
 async fn probe(host: &str, port: u16) -> anyhow::Result<()> {
-    let mut stream = TcpStream::connect((host, port)).await.with_context(|| format!("connecting to {host}:{port}"))?;
-    let request =
-        format!("GET /api/v1/health HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: node-server-healthcheck\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).await.context("sending the request")?;
+    let mut stream = TcpStream::connect((host, port))
+        .await
+        .with_context(|| format!("connecting to {host}:{port}"))?;
+    let request = format!(
+        "GET /api/v1/health HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: node-server-healthcheck\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("sending the request")?;
     let mut raw = Vec::new();
     // `Connection: close` makes the server end the stream after one response.
-    stream.read_to_end(&mut raw).await.context("reading the response")?;
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .context("reading the response")?;
     let text = String::from_utf8_lossy(&raw);
-    let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| anyhow!("malformed response from {host}:{port}"))?;
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow!("malformed response from {host}:{port}"))?;
     let status_line = head.lines().next().unwrap_or_default();
     let status: u16 = status_line
         .split_whitespace()
@@ -42,7 +53,8 @@ async fn probe(host: &str, port: u16) -> anyhow::Result<()> {
         bail!("health endpoint answered HTTP {status}");
     }
     let body = body.trim();
-    let value: serde_json::Value = serde_json::from_str(body).with_context(|| format!("unexpected health body: {body}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(body).with_context(|| format!("unexpected health body: {body}"))?;
     if value.get("status").and_then(|s| s.as_str()) != Some("ok") {
         bail!("unexpected health body: {body}");
     }

@@ -31,7 +31,10 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// The value stored in the session cookie: a digest of the key, so the key
 /// itself never reaches the browser.
 pub fn session_token(api_key: &str) -> String {
-    let digest = Sha256::new().chain_update(b"chefsprodigy-session:").chain_update(api_key.as_bytes()).finalize();
+    let digest = Sha256::new()
+        .chain_update(b"chefsprodigy-session:")
+        .chain_update(api_key.as_bytes())
+        .finalize();
     digest.iter().fold(String::with_capacity(64), |mut s, b| {
         use std::fmt::Write;
         let _ = write!(s, "{b:02x}");
@@ -43,19 +46,31 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
         .map(str::trim)
 }
 
 fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).find_map(|line| {
-        line.split(';').map(str::trim).find_map(|pair| pair.strip_prefix(name).and_then(|rest| rest.strip_prefix('=')))
-    })
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(|line| {
+            line.split(';').map(str::trim).find_map(|pair| {
+                pair.strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix('='))
+            })
+        })
 }
 
 /// Whether the request carries proof of ownership. Always true without a key.
 pub fn is_owner(state: &AppState, headers: &HeaderMap) -> bool {
-    let Some(key) = state.mcp_api_key() else { return true };
+    let Some(key) = state.mcp_api_key() else {
+        return true;
+    };
     if let Some(token) = bearer_token(headers) {
         if ct_eq(token.as_bytes(), key.as_bytes()) {
             return true;
@@ -75,11 +90,16 @@ pub struct RequireOwner;
 impl FromRequestParts<AppState> for RequireOwner {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         if is_owner(state, &parts.headers) {
             Ok(Self)
         } else {
-            Err(ApiError::Unauthorized("this action requires the node owner's key or a login session".to_string()))
+            Err(ApiError::Unauthorized(
+                "this action requires the node owner's key or a login session".to_string(),
+            ))
         }
     }
 }
@@ -90,7 +110,10 @@ pub struct OptionalOwner(pub bool);
 impl FromRequestParts<AppState> for OptionalOwner {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         Ok(Self(is_owner(state, &parts.headers)))
     }
 }
@@ -108,11 +131,16 @@ pub struct LoginRequest {
 }
 
 fn session_cookie(value: &str, max_age: u64) -> HeaderValue {
-    HeaderValue::from_str(&format!("{SESSION_COOKIE}={value}; Max-Age={max_age}; HttpOnly; SameSite=Lax; Path=/"))
-        .unwrap_or_else(|_| HeaderValue::from_static(""))
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}={value}; Max-Age={max_age}; HttpOnly; SameSite=Lax; Path=/"
+    ))
+    .unwrap_or_else(|_| HeaderValue::from_static(""))
 }
 
-async fn login(State(state): State<AppState>, JsonBody(req): JsonBody<LoginRequest>) -> Result<Response, ApiError> {
+async fn login(
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<LoginRequest>,
+) -> Result<Response, ApiError> {
     let Some(key) = state.mcp_api_key() else {
         // Single-user mode: nothing to prove, nothing to set.
         return Ok(Json(json!({ "authenticated": true, "single_user": true })).into_response());
@@ -122,14 +150,22 @@ async fn login(State(state): State<AppState>, JsonBody(req): JsonBody<LoginReque
     }
     Ok((
         StatusCode::OK,
-        [(header::SET_COOKIE, session_cookie(&session_token(key), SESSION_MAX_AGE))],
+        [(
+            header::SET_COOKIE,
+            session_cookie(&session_token(key), SESSION_MAX_AGE),
+        )],
         Json(json!({ "authenticated": true })),
     )
         .into_response())
 }
 
 async fn logout() -> Response {
-    (StatusCode::OK, [(header::SET_COOKIE, session_cookie("", 0))], Json(json!({ "authenticated": false }))).into_response()
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, session_cookie("", 0))],
+        Json(json!({ "authenticated": false })),
+    )
+        .into_response()
 }
 
 async fn me(OptionalOwner(owner): OptionalOwner) -> Json<serde_json::Value> {

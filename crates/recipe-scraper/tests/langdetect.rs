@@ -14,10 +14,22 @@ fn detects_dutch_english_russian_ukrainian_from_recipe_text() {
 
 #[test]
 fn detects_german_french_spanish_italian() {
-    assert_eq!(detect_language("Kartoffelsalat. Die Kartoffeln kochen und mit der Zwiebel und dem Essig vermischen.").as_deref(), Some("de"));
+    assert_eq!(
+        detect_language(
+            "Kartoffelsalat. Die Kartoffeln kochen und mit der Zwiebel und dem Essig vermischen."
+        )
+        .as_deref(),
+        Some("de")
+    );
     assert_eq!(detect_language("Ratatouille. Faire revenir les oignons dans l'huile avec les courgettes et les tomates.").as_deref(), Some("fr"));
     assert_eq!(detect_language("Tortilla de patatas. Freír las patatas con la cebolla y mezclar con los huevos batidos.").as_deref(), Some("es"));
-    assert_eq!(detect_language("Spaghetti alla carbonara. Cuocere la pasta e mescolare con le uova e il guanciale.").as_deref(), Some("it"));
+    assert_eq!(
+        detect_language(
+            "Spaghetti alla carbonara. Cuocere la pasta e mescolare con le uova e il guanciale."
+        )
+        .as_deref(),
+        Some("it")
+    );
 }
 
 #[test]
@@ -25,5 +37,9 @@ fn unsure_inputs_yield_none() {
     assert_eq!(detect_language(""), None);
     assert_eq!(detect_language("Pho"), None, "a bare title is not enough");
     assert_eq!(detect_language("250 g, 3 pcs, 10 ml"), None);
-    assert_eq!(detect_language("Tonkotsu ramen 豚骨ラーメン"), None, "scripts we do not model stay unknown");
+    assert_eq!(
+        detect_language("Tonkotsu ramen 豚骨ラーメン"),
+        None,
+        "scripts we do not model stay unknown"
+    );
 }

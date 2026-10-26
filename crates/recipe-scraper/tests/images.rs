@@ -3,7 +3,9 @@ use recipe_scraper::images::{MAX_WIDTH, to_webp_cover};
 use std::io::Cursor;
 
 fn png(width: u32, height: u32) -> Vec<u8> {
-    let img = RgbImage::from_fn(width, height, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]));
+    let img = RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+    });
     let mut buf = Cursor::new(Vec::new());
     img.write_to(&mut buf, ImageFormat::Png).unwrap();
     buf.into_inner()
@@ -39,7 +41,8 @@ mod store {
 
     fn store() -> (ImageStore, std::path::PathBuf) {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("recipe-images-test-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("recipe-images-test-{}-{n}", std::process::id()));
         (ImageStore::new(&dir), dir)
     }
 
@@ -50,7 +53,10 @@ mod store {
         assert_eq!(web_path, "images/01ABC.webp");
         let bytes = std::fs::read(dir.join("01ABC.webp")).unwrap();
         assert_eq!(&bytes[8..12], b"WEBP");
-        assert_eq!(store.file_path("01ABC.webp").unwrap(), dir.join("01ABC.webp"));
+        assert_eq!(
+            store.file_path("01ABC.webp").unwrap(),
+            dir.join("01ABC.webp")
+        );
     }
 
     #[test]

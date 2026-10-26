@@ -1,4 +1,6 @@
-use recipe_core::{IngredientItem, InstructionStep, MeasurementUnit, Recipe, RecipeInput, calculate_content_hash};
+use recipe_core::{
+    IngredientItem, InstructionStep, MeasurementUnit, Recipe, RecipeInput, calculate_content_hash,
+};
 
 fn sample_input() -> RecipeInput {
     RecipeInput {
@@ -25,7 +27,11 @@ fn sample_input() -> RecipeInput {
                 canonical_label: None,
             },
         ],
-        instructions: vec![InstructionStep { step_number: 1, text: "Boil.".to_string(), timer_seconds: Some(300) }],
+        instructions: vec![InstructionStep {
+            step_number: 1,
+            text: "Boil.".to_string(),
+            timer_seconds: Some(300),
+        }],
         tags: vec!["quick".to_string()],
         image_path: None,
         origin_url: Some("https://example.com/noodles".to_string()),
@@ -37,7 +43,11 @@ fn sample_input() -> RecipeInput {
 
 #[test]
 fn recipe_from_input_sets_identity_timestamps_and_hash() {
-    let recipe = Recipe::from_input("01ARZ3NDEKTSV4RRFFQ69G5FAV", sample_input(), "2026-10-21T00:00:00Z");
+    let recipe = Recipe::from_input(
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        sample_input(),
+        "2026-10-21T00:00:00Z",
+    );
     assert_eq!(recipe.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
     assert_eq!(recipe.title, "Garlic Noodles");
     assert_eq!(recipe.created_at, "2026-10-21T00:00:00Z");
@@ -69,8 +79,14 @@ fn scaled_to_multiplies_metric_amounts_and_updates_servings() {
     let scaled = recipe.scaled_to(4);
     assert_eq!(scaled.servings, 4);
     assert_eq!(scaled.ingredients[0].metric_amount, Some(400.0));
-    assert_eq!(scaled.ingredients[1].metric_amount, None, "to-taste items stay unquantified");
-    assert_eq!(scaled.ingredients[0].raw_text, "200g noodles", "raw text is never rewritten");
+    assert_eq!(
+        scaled.ingredients[1].metric_amount, None,
+        "to-taste items stay unquantified"
+    );
+    assert_eq!(
+        scaled.ingredients[0].raw_text, "200g noodles",
+        "raw text is never rewritten"
+    );
 }
 
 #[test]
@@ -109,7 +125,10 @@ fn recipe_input_round_trips_from_recipe() {
 fn recipe_input_deserializes_with_defaults_for_optional_fields() {
     let json = r#"{"title":"Toast","ingredients":[],"instructions":[]}"#;
     let input: RecipeInput = serde_json::from_str(json).unwrap();
-    assert_eq!(input.servings, 4, "servings defaults to 4 like the DB schema");
+    assert_eq!(
+        input.servings, 4,
+        "servings defaults to 4 like the DB schema"
+    );
     assert!(input.tags.is_empty());
     assert!(!input.is_public);
 }
@@ -134,7 +153,11 @@ mod i18n {
         assert_eq!(normalize_lang("x"), None);
         assert_eq!(normalize_lang("12"), None);
         let r = Recipe::from_input("id", input(), "t");
-        assert_eq!(r.language.as_deref(), Some("nl"), "normalized on the way in");
+        assert_eq!(
+            r.language.as_deref(),
+            Some("nl"),
+            "normalized on the way in"
+        );
         let no_lang: RecipeInput = serde_json::from_str(r#"{"title":"T"}"#).unwrap();
         assert_eq!(Recipe::from_input("id", no_lang, "t").language, None);
     }
@@ -167,15 +190,25 @@ mod i18n {
         let loc = r.localized(&t);
         assert_eq!(loc.recipe.title, "Фо");
         assert_eq!(loc.recipe.ingredients[0].raw_text, "1 кг костей");
-        assert_eq!(loc.recipe.ingredients[0].canonical_id, "beef_bones", "normalization layer untouched");
+        assert_eq!(
+            loc.recipe.ingredients[0].canonical_id, "beef_bones",
+            "normalization layer untouched"
+        );
         assert_eq!(loc.recipe.ingredients[0].metric_amount, Some(1000.0));
         assert_eq!(loc.recipe.instructions[1].text, "Подавать.");
         assert_eq!(loc.recipe.instructions[1].step_number, 2);
         assert_eq!(loc.recipe.tags, vec!["суп"]);
         assert_eq!(loc.recipe.content_hash, r.content_hash);
-        assert_eq!(loc.recipe.language.as_deref(), Some("nl"), "source language stays");
+        assert_eq!(
+            loc.recipe.language.as_deref(),
+            Some("nl"),
+            "source language stays"
+        );
         let info = loc.translation.unwrap();
-        assert_eq!((info.lang.as_str(), info.origin, info.stale), ("ru", TranslationOrigin::Llm, false));
+        assert_eq!(
+            (info.lang.as_str(), info.origin, info.stale),
+            ("ru", TranslationOrigin::Llm, false)
+        );
 
         let json = serde_json::to_value(r.localized(&t)).unwrap();
         assert_eq!(json["title"], "Фо", "flattened: same shape as a recipe");
@@ -188,13 +221,26 @@ mod i18n {
     fn translation_with_wrong_lengths_is_padded_from_source() {
         let r = Recipe::from_input("id", input(), "t");
         let t = RecipeTranslation {
-            lang: "ru".into(), title: "Фо".into(), description: None,
-            ingredients: vec!["1 кг костей".into()], instructions: vec![], tags: vec![],
-            origin: TranslationOrigin::Human, source_updated_at: "old".into(), created_at: "t".into(), updated_at: "t".into(),
+            lang: "ru".into(),
+            title: "Фо".into(),
+            description: None,
+            ingredients: vec!["1 кг костей".into()],
+            instructions: vec![],
+            tags: vec![],
+            origin: TranslationOrigin::Human,
+            source_updated_at: "old".into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
         };
         let loc = r.localized(&t);
-        assert_eq!(loc.recipe.ingredients[1].raw_text, "zout", "missing items fall back to the source wording");
+        assert_eq!(
+            loc.recipe.ingredients[1].raw_text, "zout",
+            "missing items fall back to the source wording"
+        );
         assert_eq!(loc.recipe.instructions[0].text, "Kook.");
-        assert!(loc.translation.unwrap().stale, "source_updated_at differs from recipe.updated_at");
+        assert!(
+            loc.translation.unwrap().stale,
+            "source_updated_at differs from recipe.updated_at"
+        );
     }
 }
