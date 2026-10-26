@@ -278,6 +278,7 @@ h3 { margin: 0; font-size: 1.04rem; line-height: 1.25; }
 .recipe-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; }
 .translation-notice { display: grid; gap: 0.85rem; padding: 0.9rem 1rem; margin: 0 0 1.25rem; color: var(--ink-800); background: var(--sage-100); border: 1px solid var(--ink-300); border-radius: var(--radius-md); }
 .translation-notice.is-source { background: #fff6e6; border-color: var(--amber-300); }
+.visitor-translation-hint { margin-bottom: 1rem; background: var(--sage-100); border-color: var(--ink-300); }
 .translation-notice-copy { display: grid; gap: 0.22rem; min-width: 0; font-size: 0.82rem; }
 .translation-notice-copy strong { color: var(--ink-900); font-size: 0.88rem; }
 .translation-notice-copy span { color: var(--ink-600, #55766a); }
@@ -365,6 +366,7 @@ h3 { margin: 0; font-size: 1.04rem; line-height: 1.25; }
 .dialog-heading { display: flex; justify-content: space-between; gap: 1rem; }
 .dialog-heading h2 { font-size: 2rem; }
 .dialog-description { max-width: 31rem; margin: 0.5rem 0 0; color: var(--ink-700); }
+.login-form { display: grid; gap: 0.85rem; margin-top: 1.2rem; }
 .icon-button { flex: 0 0 auto; align-self: start; min-height: 2.3rem; padding: 0.36rem 0.6rem; color: var(--ink-700); font-size: 0.8rem; font-weight: 800; background: var(--sage-100); border: 1px solid transparent; border-radius: 0.6rem; }
 .icon-button:hover { color: var(--ink-900); border-color: var(--ink-300); }
 .import-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35rem; padding: 0.3rem; margin: 1.5rem 0 1.15rem; background: var(--cream-200); border-radius: 0.8rem; }

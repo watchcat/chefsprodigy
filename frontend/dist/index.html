@@ -35,9 +35,11 @@
             <option value="nl">Nederlands</option>
           </select>
         </label>
-        <button class="button button-secondary button-compact" type="button" data-action="new-recipe" data-i18n="New recipe">New recipe</button>
+        <button class="button button-secondary button-compact" type="button" data-action="open-login" data-visitor-only data-i18n="Log in" hidden>Log in</button>
+        <button class="button button-secondary button-compact" type="button" data-action="new-recipe" data-owner-only data-i18n="New recipe" hidden>New recipe</button>
         <button class="button button-secondary button-compact" id="install-app-button" type="button" data-action="install-app" aria-label="Install Chef's Prodigy" data-i18n="Install" data-i18n-attr="aria-label:Install Chef's Prodigy" hidden>Install</button>
-        <button class="button button-primary button-compact" type="button" data-action="open-import" data-i18n="Import recipe">Import recipe</button>
+        <button class="button button-primary button-compact" type="button" data-action="open-import" data-owner-only data-i18n="Import recipe" hidden>Import recipe</button>
+        <button class="button button-tertiary button-compact" type="button" data-action="logout" data-owner-only data-i18n="Log out" hidden>Log out</button>
       </nav>
     </div>
   </header>
@@ -164,6 +166,28 @@
         <button class="button button-secondary" type="button" data-action="cancel-delete">Keep recipe</button>
         <button class="button button-danger" type="button" data-action="confirm-delete">Delete recipe</button>
       </div>
+    </div>
+  </dialog>
+
+  <dialog class="confirm-dialog login-dialog" id="login-dialog" aria-labelledby="login-dialog-title" aria-describedby="login-dialog-description">
+    <div class="dialog-surface">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow" data-i18n="Owner access">Owner access</p>
+          <h2 id="login-dialog-title" data-i18n="Sign in to your node">Sign in to your node</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-login" aria-label="Close login dialog" data-i18n="Close" data-i18n-attr="aria-label:Close login dialog">Close</button>
+      </div>
+      <p class="dialog-description" id="login-dialog-description" data-i18n="Sign in with the key configured for this recipe node. It stays in an HttpOnly session cookie on this device.">Sign in with the key configured for this recipe node. It stays in an HttpOnly session cookie on this device.</p>
+      <form class="login-form" id="login-form">
+        <label class="field-label" for="login-api-key" data-i18n="Node owner key">Node owner key</label>
+        <input class="text-input" id="login-api-key" name="apiKey" type="password" autocomplete="current-password" required placeholder="Enter the node owner's API key" data-i18n-attr="placeholder:Enter the node owner's API key">
+        <p class="form-status" id="login-dialog-status" aria-live="polite"></p>
+        <div class="form-actions">
+          <button class="button button-secondary" type="button" data-action="close-login" data-i18n="Cancel">Cancel</button>
+          <button class="button button-primary" type="submit" data-i18n="Sign in">Sign in</button>
+        </div>
+      </form>
     </div>
   </dialog>
 

@@ -12,6 +12,7 @@
   const shoppingLink = document.querySelector("#shopping-link");
   const importDialog = document.querySelector("#import-dialog");
   const deleteDialog = document.querySelector("#delete-dialog");
+  const loginDialog = document.querySelector("#login-dialog");
   const installAppButton = document.querySelector("#install-app-button");
   const languageSelect = document.querySelector("#ui-language");
   const toastRegion = document.querySelector("#toast-region");
@@ -40,6 +41,10 @@
     cook: null,
     pendingDelete: null,
     installPrompt: null,
+    auth: {
+      authenticated: false,
+      loaded: false,
+    },
     editorFieldSequence: 0,
     photoPreviewUrls: [],
     shopping: {
@@ -321,18 +326,143 @@
     window.setTimeout(() => toast.remove(), 4200);
   }
 
+  function isOwner() {
+    return state.auth.loaded && state.auth.authenticated;
+  }
+
+  function syncAuthenticationUI() {
+    const owner = isOwner();
+    document.querySelectorAll("[data-owner-only]").forEach((element) => {
+      element.hidden = !owner;
+    });
+    document.querySelectorAll("[data-visitor-only]").forEach((element) => {
+      element.hidden = owner || !state.auth.loaded;
+    });
+  }
+
+  async function refreshAuthentication() {
+    try {
+      const result = await apiRequest("/auth/me", { loginPrompt: false });
+      state.auth.authenticated = Boolean(result && result.authenticated);
+    } catch {
+      state.auth.authenticated = false;
+    }
+    state.auth.loaded = true;
+    syncAuthenticationUI();
+    return state.auth.authenticated;
+  }
+
+  function setLoginStatus(message = "", success = false) {
+    const status = document.querySelector("#login-dialog-status");
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle("is-success", success);
+  }
+
+  function openLoginDialog(message = "") {
+    if (!loginDialog) return;
+    setLoginStatus(message);
+    if (typeof loginDialog.showModal === "function") {
+      if (!loginDialog.open) loginDialog.showModal();
+    } else {
+      loginDialog.setAttribute("open", "");
+    }
+    window.setTimeout(() => document.querySelector("#login-api-key")?.focus(), 0);
+  }
+
+  function closeLoginDialog() {
+    if (!loginDialog) return;
+    if (typeof loginDialog.close === "function" && loginDialog.open) loginDialog.close();
+    else loginDialog.removeAttribute("open");
+    const form = document.querySelector("#login-form");
+    if (form instanceof HTMLFormElement) form.reset();
+    setLoginStatus("");
+  }
+
+  function requireOwner() {
+    if (isOwner()) return true;
+    openLoginDialog(t("Sign in to manage recipes."));
+    return false;
+  }
+
+  function renderOwnerAccessStatus() {
+    return renderStatus({
+      title: t("Owner access required"),
+      message: t("Visitors can browse public recipes. Sign in to create, edit, import, delete, or correct translations."),
+      actionLabel: t("Log in"),
+      action: "open-login",
+    });
+  }
+
+  async function submitLogin(form) {
+    const status = document.querySelector("#login-dialog-status");
+    const submitButton = form.querySelector("button[type='submit']");
+    const input = form.querySelector("#login-api-key");
+    const apiKey = input instanceof HTMLInputElement ? input.value.trim() : "";
+    if (!apiKey) {
+      setLoginStatus(t("Enter the node owner's API key."));
+      input?.focus();
+      return;
+    }
+    if (submitButton) submitButton.disabled = true;
+    setLoginStatus(t("Signing in…"));
+    try {
+      const result = await apiRequest("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ api_key: apiKey }),
+        loginPrompt: false,
+      });
+      if (!result || !result.authenticated) throw new Error(t("The node could not confirm your owner session."));
+      await refreshAuthentication();
+      closeLoginDialog();
+      showToast(t("Signed in as the node owner."));
+      await handleRoute();
+    } catch (error) {
+      if (status) setLoginStatus(error.message);
+    } finally {
+      if (submitButton) submitButton.disabled = false;
+    }
+  }
+
+  async function logout() {
+    try {
+      const result = await apiRequest("/auth/logout", { method: "POST", loginPrompt: false });
+      await refreshAuthentication();
+      closeImportDialog();
+      closeDeleteDialog();
+      if (result && result.authenticated === false && !isOwner()) {
+        showToast(t("Signed out. You can still browse public recipes."));
+      } else {
+        showToast(t("This node is in single-user mode; no sign-in is required."));
+      }
+      navigate("/");
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  }
+
   async function apiRequest(path, options = {}) {
-    const headers = new Headers(options.headers || {});
-    if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const { loginPrompt = true, ...requestOptions } = options;
+    const headers = new Headers(requestOptions.headers || {});
+    if (requestOptions.body && !(requestOptions.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
 
     let response;
     try {
-      response = await fetch(`${API_ROOT}${path}`, { ...options, headers });
+      response = await fetch(`${API_ROOT}${path}`, { ...requestOptions, headers });
     } catch {
       throw new Error("Could not reach your recipe node. Check that the node is running and try again.");
     }
 
-    if (!response.ok) throw await responseError(response);
+    if (!response.ok) {
+      const error = await responseError(response);
+      if (response.status === 401 && loginPrompt) {
+        state.auth.authenticated = false;
+        state.auth.loaded = true;
+        syncAuthenticationUI();
+        openLoginDialog(t("Your login session has expired. Sign in again to continue."));
+      }
+      throw error;
+    }
     if (response.status === 204) return null;
     return response.json();
   }
@@ -417,6 +547,12 @@
 
     if (previousRoute.name === "cook" && (nextRoute.name !== "cook" || nextRoute.id !== previousRoute.id)) {
       stopCookSession();
+    }
+
+    if ((nextRoute.name === "editor" || nextRoute.name === "translation-editor") && !isOwner()) {
+      document.title = "Owner access required · Chef's Prodigy";
+      setView(renderOwnerAccessStatus());
+      return;
     }
 
     if (nextRoute.name === "library") {
@@ -606,6 +742,7 @@
 
   function renderLibrary() {
     const root = create("section", { className: "library-view" });
+    const owner = isOwner();
     const hero = create("div", { className: "hero" }, [
       create("div", { className: "hero-copy" }, [
         create("p", { className: "eyebrow", text: t("Your private kitchen archive") }),
@@ -616,9 +753,9 @@
         }),
       ]),
       create("div", { className: "hero-actions" }, [
-        button(t("Create a recipe"), "new-recipe", { className: "button button-secondary" }),
+        owner ? button(t("Create a recipe"), "new-recipe", { className: "button button-secondary" }) : null,
         button(t("Plan a shopping list"), "open-shopping", { className: "button button-secondary" }),
-        button(t("Import a recipe"), "open-import", { className: "button button-coral" }),
+        owner ? button(t("Import a recipe"), "open-import", { className: "button button-coral" }) : null,
       ]),
     ]);
     root.append(hero, renderSearchPanel());
@@ -651,9 +788,9 @@
         title: filtered ? "No recipes match those ingredients." : "Your recipe shelf is ready.",
         message: filtered
           ? "Try a broader search, clear a filter, or bring in a recipe from a link or text."
-          : "Import a recipe from a favourite site or paste one in to start your collection.",
-        actionLabel: filtered ? "Clear filters" : "Import your first recipe",
-        action: filtered ? "clear-filters" : "open-import",
+          : owner ? "Import a recipe from a favourite site or paste one in to start your collection." : t("Visitors can browse public recipes. Sign in to add recipes to this node."),
+        actionLabel: filtered ? "Clear filters" : owner ? "Import your first recipe" : t("Log in"),
+        action: filtered ? "clear-filters" : owner ? "open-import" : "open-login",
       }));
       return root;
     }
@@ -1021,10 +1158,20 @@
           className: "button button-secondary button-small",
           dataset: { id: recipe.id },
         }),
-        button(t("Fix translation"), "edit-translation", {
+        isOwner() ? button(t("Fix translation"), "edit-translation", {
           className: "button button-secondary button-small",
           dataset: { id: recipe.id },
-        }),
+        }) : null,
+      ]),
+    ]);
+  }
+
+  function renderVisitorTranslationHint(recipe, translation) {
+    if (isOwner() || !state.auth.loaded || translation || state.language === stringValue(recipe.language)) return null;
+    return create("aside", { className: "translation-notice visitor-translation-hint", attributes: { role: "status" } }, [
+      create("div", { className: "translation-notice-copy" }, [
+        create("strong", { text: t("Translation availability") }),
+        create("span", { text: t("Translations become available to visitors after the owner views this recipe in {language}.", { language: languageName(state.language) }) }),
       ]),
     ]);
   }
@@ -1037,6 +1184,8 @@
 
     const translationNotice = renderTranslationNotice(recipe, translation);
     if (translationNotice) root.append(translationNotice);
+    const visitorTranslationHint = renderVisitorTranslationHint(recipe, translation);
+    if (visitorTranslationHint) root.append(visitorTranslationHint);
 
     const summary = create("div", { className: "recipe-summary" }, [
       create("div", { className: "tag-list" }, safeArray(recipe.tags).map((tag) => create("span", { className: "tag", text: tag }))),
@@ -1045,8 +1194,8 @@
       create("div", { className: "recipe-detail-meta" }, recipeMetadata(recipe)),
       create("div", { className: "recipe-actions" }, [
         button(t("Start Cook Mode"), "open-cook", { className: "button button-coral", dataset: { id: recipe.id } }),
-        button(t("Edit recipe"), "edit-recipe", { className: "button button-secondary", dataset: { id: recipe.id } }),
-        button(t("Delete recipe"), "request-delete", { className: "button button-danger", dataset: { id: recipe.id } }),
+        isOwner() ? button(t("Edit recipe"), "edit-recipe", { className: "button button-secondary", dataset: { id: recipe.id } }) : null,
+        isOwner() ? button(t("Delete recipe"), "request-delete", { className: "button button-danger", dataset: { id: recipe.id } }) : null,
       ]),
     ]);
     root.append(create("div", { className: "recipe-hero" }, [renderCover(recipe.image_path, title, "recipe-cover-large"), summary]));
@@ -1587,6 +1736,7 @@
   }
 
   function openImportDialog() {
+    if (!requireOwner()) return;
     document.querySelectorAll(".form-status").forEach((status) => {
       status.textContent = "";
       status.classList.remove("is-success");
@@ -1705,6 +1855,7 @@
   }
 
   function openDeleteDialog(id) {
+    if (!requireOwner()) return;
     if (!state.recipe || state.recipe.id !== id) return;
     state.pendingDelete = { id, title: stringValue(state.recipe.title, "this recipe") };
     document.querySelector("#delete-recipe-title").textContent = state.pendingDelete.title;
@@ -1730,6 +1881,11 @@
   async function confirmDelete() {
     const target = state.pendingDelete;
     if (!target) return;
+    if (!isOwner()) {
+      closeDeleteDialog();
+      requireOwner();
+      return;
+    }
 
     const status = document.querySelector("#delete-dialog-status");
     const controls = Array.from(deleteDialog.querySelectorAll("button"));
@@ -2009,6 +2165,7 @@
   }
 
   async function submitRecipeEditor(form) {
+    if (!requireOwner()) return;
     const status = form.querySelector("[data-editor-status]");
     const submitButton = form.querySelector("button[type='submit']");
     const mode = form.getAttribute("data-editor-mode") || "create";
@@ -2077,6 +2234,7 @@
   }
 
   async function submitTranslationEditor(form) {
+    if (!requireOwner()) return;
     const id = stringValue(form.getAttribute("data-recipe-id"));
     const lang = stringValue(form.getAttribute("data-translation-lang"));
     const status = form.querySelector("[data-translation-status]");
@@ -2391,17 +2549,29 @@
     const action = target.dataset.action;
     if (!action) return;
 
-    if (action === "new-recipe") {
+    if (action === "open-login") {
       event.preventDefault();
+      openLoginDialog();
+    } else if (action === "close-login") {
+      event.preventDefault();
+      closeLoginDialog();
+    } else if (action === "logout") {
+      event.preventDefault();
+      logout();
+    } else if (action === "new-recipe") {
+      event.preventDefault();
+      if (!requireOwner()) return;
       navigate("/new");
     } else if (action === "open-shopping") {
       event.preventDefault();
       navigate("/shopping");
     } else if (action === "edit-recipe") {
       event.preventDefault();
+      if (!requireOwner()) return;
       navigate(`/recipe/${encodeURIComponent(target.dataset.id || "")}/edit`);
     } else if (action === "edit-translation") {
       event.preventDefault();
+      if (!requireOwner()) return;
       navigate(`/recipe/${encodeURIComponent(target.dataset.id || "")}/translation`);
     } else if (action === "show-original") {
       event.preventDefault();
@@ -2497,7 +2667,11 @@
   function onSubmit(event) {
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
-    if (form.id === "search-form") {
+    if (form.id === "login-form") {
+      event.preventDefault();
+      if (!form.reportValidity()) return;
+      submitLogin(form);
+    } else if (form.id === "search-form") {
       event.preventDefault();
       applySearch(form);
     } else if (form.id === "shopping-list-form") {
@@ -2509,10 +2683,12 @@
       submitRecipeEditor(form);
     } else if (form.id === "translation-editor-form") {
       event.preventDefault();
+      if (!requireOwner()) return;
       if (!form.reportValidity()) return;
       submitTranslationEditor(form);
     } else if (form.id === "url-import-form" || form.id === "text-import-form" || form.id === "photo-import-form" || form.id === "mealie-import-form") {
       event.preventDefault();
+      if (!requireOwner()) return;
       if (!form.reportValidity()) return;
       if (form.id === "photo-import-form") submitPhotoImport(form);
       else if (form.id === "mealie-import-form") submitMealieBackup(form);
@@ -2592,6 +2768,9 @@
   deleteDialog.addEventListener("cancel", () => {
     state.pendingDelete = null;
   });
+  loginDialog?.addEventListener("click", (event) => {
+    if (event.target === loginDialog) closeLoginDialog();
+  });
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
@@ -2611,6 +2790,7 @@
       }
     }
     applyStaticTranslations();
+    await refreshAuthentication();
     updateInstallAppButton();
     setImportTab("url");
     handleRoute();
