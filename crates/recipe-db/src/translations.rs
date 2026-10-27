@@ -145,7 +145,9 @@ impl Db {
         Ok(rows.into_iter().collect())
     }
 
-    /// Insert or replace labels for `lang`.
+    /// Insert or replace labels for `lang`. A model (`llm`) label never replaces
+    /// a human one, so seeded and hand-corrected terms stay put; a human label
+    /// replaces anything.
     pub async fn upsert_terms(
         &self,
         lang: &str,
@@ -159,7 +161,8 @@ impl Db {
         for (id, label) in labels {
             sqlx::query(
                 "INSERT INTO canonical_terms (canonical_id, lang, label, origin) VALUES (?, ?, ?, ?) \
-                 ON CONFLICT(canonical_id, lang) DO UPDATE SET label = excluded.label, origin = excluded.origin",
+                 ON CONFLICT(canonical_id, lang) DO UPDATE SET label = excluded.label, origin = excluded.origin \
+                 WHERE excluded.origin = 'human' OR canonical_terms.origin <> 'human'",
             )
             .bind(id)
             .bind(lang)

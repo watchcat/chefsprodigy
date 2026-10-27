@@ -130,7 +130,10 @@ pub struct FederatedRecipe { #[serde(flatten)] pub recipe: Recipe, pub translati
 
 Localized ingredient labels come from `canonical_terms` (`TranslationService::labels`):
 cached per `(canonical_id, lang)`, fetched from the model in batches of up to 100 with a
-humanized id as fallback; a seeded dictionary of everyday ingredients is planned (RN-75).
+humanized id as fallback. A seeded dictionary (`migrations/20261027000001_seed_canonical_terms.sql`,
+RN-75) ships about 230 everyday ids with `en`, `ru` and `nl` labels as `origin = 'human'` rows, so
+basic terms never cost a model call; the upsert in `recipe-db` lets a model label replace only
+`llm` rows, never human ones, and `INSERT OR IGNORE` keeps labels already stored.
 
 ### `content_hash` Calculation Algorithm
 To protect authorship and deduplicate recipes in the Central Aggregator, implement `calculate_content_hash(recipe)`:

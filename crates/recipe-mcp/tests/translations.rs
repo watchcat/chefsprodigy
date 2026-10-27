@@ -342,9 +342,10 @@ mod labels {
             batch_sizes: std::sync::Mutex::new(vec![]),
         });
         let (_, svc) = setup(fake.clone()).await;
-        let ids: Vec<String> = vec!["garlic".into(), "salt".into(), "mystery".into()];
+        // Ids outside the seeded dictionary, so the model path is exercised.
+        let ids: Vec<String> = vec!["gochujang".into(), "doenjang".into(), "mystery".into()];
         let m = svc.labels(&ids, "ru").await.unwrap();
-        assert_eq!(m["garlic"], "ru:garlic");
+        assert_eq!(m["gochujang"], "ru:gochujang");
         assert_eq!(
             m["mystery"], "mystery",
             "unanswered ids fall back to the humanized id"
@@ -352,10 +353,10 @@ mod labels {
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
 
         let m = svc
-            .labels(&["garlic".into(), "black_pepper".into()], "ru")
+            .labels(&["gochujang".into(), "furikake".into()], "ru")
             .await
             .unwrap();
-        assert_eq!(m["black_pepper"], "ru:black_pepper");
+        assert_eq!(m["furikake"], "ru:furikake");
         assert_eq!(
             fake.calls.load(Ordering::SeqCst),
             2,
@@ -370,6 +371,48 @@ mod labels {
             sizes[sizes.len() - 3..].to_vec(),
             vec![100, 100, 30],
             "batched by 100"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_everyday_terms_cost_no_model_call() {
+        let fake = Arc::new(TermFake {
+            calls: AtomicUsize::new(0),
+            batch_sizes: std::sync::Mutex::new(vec![]),
+        });
+        let (_, svc) = setup(fake.clone()).await;
+        let ids: Vec<String> = vec!["salt".into(), "garlic".into(), "onion".into()];
+        let ru = svc.labels(&ids, "ru").await.unwrap();
+        assert_eq!(
+            (
+                ru["salt"].as_str(),
+                ru["garlic"].as_str(),
+                ru["onion"].as_str()
+            ),
+            ("соль", "чеснок", "лук")
+        );
+        let nl = svc.labels(&ids, "nl").await.unwrap();
+        assert_eq!(
+            (
+                nl["salt"].as_str(),
+                nl["garlic"].as_str(),
+                nl["onion"].as_str()
+            ),
+            ("zout", "knoflook", "ui")
+        );
+        let en = svc.labels(&ids, "en").await.unwrap();
+        assert_eq!(
+            (
+                en["salt"].as_str(),
+                en["garlic"].as_str(),
+                en["onion"].as_str()
+            ),
+            ("salt", "garlic", "onion")
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            0,
+            "the seeded dictionary answers without the model"
         );
     }
 
@@ -391,7 +434,8 @@ mod labels {
         let loc = svc.localize(r.clone(), Some("ru")).await.unwrap();
         assert_eq!(
             loc.recipe.ingredients[0].canonical_label.as_deref(),
-            Some("ru:beef_bones")
+            Some("говяжьи кости"),
+            "beef_bones comes from the seeded dictionary, not the fake"
         );
         assert_eq!(
             loc.recipe.title, "Pho",

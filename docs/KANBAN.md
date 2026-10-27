@@ -16,10 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-75 · Seeded `canonical_terms` dictionary (S)
-SQLite migration inserting `en`, `ru`, `nl` labels for the ~200 most common everyday ingredients (`salt`, `garlic`, `onion`, `butter`, `egg`, `olive_oil`, …) with `origin = 'human'` via `INSERT OR IGNORE`, so hubs never spend model tokens on basic terms and the gateway cache is not relied on for them (spec §4.3).
-- Acceptance: a fresh node labels `salt`/`garlic`/`onion` in all three languages with no model call (fake extractor records zero `translate_terms` calls); rows that already exist are untouched.
-
 ### RN-69 · platform v1: registry, poller, index, search API (M)
 New crate per spec §5.3 without mail and signup: hub registry, federation poller with backoff comparing `(updated_at, content_hash)` and each translation's `(lang, updated_at)`, `recipes_index` + `translations_index`, FTS with one row per `(hub, recipe, lang)`, fork grouping by content hash, `GET /api/v1/search?lang=` returning the matched language's title/tags and `matched_lang`.
 - Acceptance: two hubs indexed from manifests; a translation added on a hub appears in `ru` search after the next poll with no recipe change; forks grouped; recipes and translations removed on the next poll after unpublishing.
@@ -80,6 +76,12 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-75 · Seeded `canonical_terms` dictionary (S)
+SQLite migration inserting `en`, `ru`, `nl` labels for the ~200 most common everyday ingredients (`salt`, `garlic`, `onion`, `butter`, `egg`, `olive_oil`, …) with `origin = 'human'` via `INSERT OR IGNORE`, so hubs never spend model tokens on basic terms and the gateway cache is not relied on for them (spec §4.3).
+- Acceptance: a fresh node labels `salt`/`garlic`/`onion` in all three languages with no model call (fake extractor records zero `translate_terms` calls); rows that already exist are untouched.
+
+- Done 2026-10-27: `migrations/20261027000001_seed_canonical_terms.sql` seeds 245 everyday canonical ids (seasonings, oils and condiments, dairy, grains and legumes, vegetables, fruit and nuts, meat and fish, plus common plural forms the heuristic normalizer produces such as `eggs`, `tomatoes`, `onions`) with `en`, `ru` and `nl` labels (735 rows) as `origin = 'human'` via `INSERT OR IGNORE`. The recipe-db upsert now lets a model (`llm`) label replace only `llm` rows (`DO UPDATE … WHERE excluded.origin = 'human' OR canonical_terms.origin <> 'human'`), so seeded and hand-corrected terms are never overwritten while a human label replaces anything. Side effect: anonymous readers now see seeded labels (they are cached), still with zero model calls. 4 new tests (seeds present in three languages with ≥ 600 rows and human origin; llm-vs-human overwrite rules; service labels `salt`/`garlic`/`onion` in ru/nl/en with zero `translate_terms` calls; API recipe view in all three languages with a counting fake at zero). Six existing tests moved to unseeded ids (`gochujang`, `doenjang`, `furikake`) or to the seeded labels (`beef_bones` → говяжьи кости / runderbotten, `star_anise` → бадьян, `egg` → яйцо).
 
 ### RN-68 · llm-gateway v2: quotas, cache, admin API (M)
 Daily/monthly quotas, deterministic-reply cache, admin endpoints and BYOK per spec §5.2.
@@ -162,6 +164,3 @@ Bug: on `#/recipe/{id}/edit` the title and eyebrow rendered one character per li
 ### RN-51 · Verify photo import with real photos (S)
 Verified 2026-10-23 with MiniMax-M3: a Marley Spoon card (front with hero photo + back with Dutch text) imports with the full title, 12 ingredients, 6 steps with timers, servings 2, cook 30 min, and the front photo as cover; an English card ("Willow Chicken in Black Bean Sauce") also imported. Fixes found on the way: `classification`/`type` keys for photo kinds, notes mentioning a dish photo promote a text page to cover, equipment filtered from ingredients, nested `times` objects, synthesized title when the card side has no title.
 Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pasta name sometimes misread ("torchiatelle").
-
-### RN-47 · Dev tooling: devbuild.sh, .env, per-toolchain target dirs (S)
-`scripts/devbuild.sh` builds, runs, seeds and opens the browser; loads `.env` (template `.env.example`, git-ignored); uses `target/rustc-<version>/` per toolchain and refuses a stale `DEVELOPER_DIR`.

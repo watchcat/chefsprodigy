@@ -716,9 +716,10 @@ mod i18n_search {
 
     #[tokio::test]
     async fn canonical_terms_round_trip() {
+        // Ids outside the seeded dictionary (RN-75), so the table starts empty for them.
         let db = fresh_db().await;
         assert!(
-            db.get_terms(&["garlic".into()], "ru")
+            db.get_terms(&["gochujang".into()], "ru")
                 .await
                 .unwrap()
                 .is_empty()
@@ -726,29 +727,125 @@ mod i18n_search {
         db.upsert_terms(
             "ru",
             &[
-                ("garlic".into(), "чеснок".into()),
-                ("salt".into(), "соль".into()),
+                ("gochujang".into(), "кочхуджан".into()),
+                ("doenjang".into(), "твенджан".into()),
             ],
             TranslationOrigin::Llm,
         )
         .await
         .unwrap();
         let m = db
-            .get_terms(&["garlic".into(), "salt".into(), "egg".into()], "ru")
+            .get_terms(
+                &["gochujang".into(), "doenjang".into(), "furikake".into()],
+                "ru",
+            )
             .await
             .unwrap();
-        assert_eq!(m.get("garlic").map(String::as_str), Some("чеснок"));
+        assert_eq!(m.get("gochujang").map(String::as_str), Some("кочхуджан"));
         assert_eq!(m.len(), 2);
         db.upsert_terms(
             "ru",
-            &[("garlic".into(), "чесночок".into())],
+            &[("gochujang".into(), "кочудян".into())],
             TranslationOrigin::Human,
         )
         .await
         .unwrap();
         assert_eq!(
-            db.get_terms(&["garlic".into()], "ru").await.unwrap()["garlic"],
-            "чесночок"
+            db.get_terms(&["gochujang".into()], "ru").await.unwrap()["gochujang"],
+            "кочудян"
+        );
+    }
+}
+
+mod seeded_terms {
+    use super::*;
+    use recipe_core::TranslationOrigin;
+
+    #[tokio::test]
+    async fn everyday_ingredients_are_labelled_in_three_languages_on_a_fresh_database() {
+        let db = fresh_db().await;
+        let ids: Vec<String> = ["salt", "garlic", "onion", "olive_oil", "egg", "butter"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let expected = [
+            ("en", "salt", "salt"),
+            ("ru", "salt", "соль"),
+            ("nl", "salt", "zout"),
+            ("ru", "garlic", "чеснок"),
+            ("nl", "onion", "ui"),
+            ("ru", "olive_oil", "оливковое масло"),
+            ("nl", "butter", "boter"),
+            ("en", "egg", "egg"),
+        ];
+        for (lang, id, label) in expected {
+            let terms = db.get_terms(&ids, lang).await.unwrap();
+            assert_eq!(terms.len(), ids.len(), "{lang}: every id seeded: {terms:?}");
+            assert_eq!(terms[id], label, "{lang}/{id}");
+        }
+        let origin: String = sqlx::query_scalar(
+            "SELECT origin FROM canonical_terms WHERE canonical_id = 'salt' AND lang = 'ru'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(origin, "human", "seeded rows count as human-made");
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_terms")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert!(
+            total >= 600,
+            "about 200 ids in three languages, got {total}"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_labels_never_overwrite_human_rows_but_humans_can() {
+        let db = fresh_db().await;
+        db.upsert_terms(
+            "ru",
+            &[("salt".into(), "модельная соль".into())],
+            TranslationOrigin::Llm,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.get_terms(&["salt".into()], "ru").await.unwrap()["salt"],
+            "соль",
+            "an llm upsert leaves the seeded human label alone"
+        );
+
+        db.upsert_terms(
+            "ru",
+            &[("gochujang".into(), "кочхуджан (модель)".into())],
+            TranslationOrigin::Llm,
+        )
+        .await
+        .unwrap();
+        db.upsert_terms(
+            "ru",
+            &[("gochujang".into(), "кочхуджан".into())],
+            TranslationOrigin::Human,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.get_terms(&["gochujang".into()], "ru").await.unwrap()["gochujang"],
+            "кочхуджан",
+            "a human upsert replaces an llm label"
+        );
+        db.upsert_terms(
+            "ru",
+            &[("gochujang".into(), "снова модель".into())],
+            TranslationOrigin::Llm,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.get_terms(&["gochujang".into()], "ru").await.unwrap()["gochujang"],
+            "кочхуджан",
+            "and the human label then stays"
         );
     }
 }

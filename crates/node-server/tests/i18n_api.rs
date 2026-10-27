@@ -111,6 +111,84 @@ async fn send(
     )
 }
 
+/// Records how often the node asks the model for ingredient labels.
+struct CountingTerms(std::sync::atomic::AtomicUsize);
+
+impl RecipeExtractor for CountingTerms {
+    fn normalize_ingredients<'a>(
+        &'a self,
+        _r: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<IngredientItem>, ScraperError>> + Send + 'a>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+    fn extract_recipe<'a>(
+        &'a self,
+        _m: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<ExtractedRecipeDraft, ScraperError>> + Send + 'a>> {
+        Box::pin(async { Err(ScraperError::LlmUnavailable) })
+    }
+    fn translate_terms<'a>(
+        &'a self,
+        ids: &'a [String],
+        lang: &'a str,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<std::collections::HashMap<String, String>, ScraperError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(ids
+                .iter()
+                .map(|id| (id.clone(), format!("{lang}:{id}")))
+                .collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn everyday_ingredients_are_labelled_without_a_model_call() {
+    let counter = Arc::new(CountingTerms(std::sync::atomic::AtomicUsize::new(0)));
+    let app = app(counter.clone()).await;
+    let recipe = json!({"title": "Soup", "servings": 2,
+        "ingredients": [
+            {"raw_text": "1 tsp salt", "metric_amount": 5.0, "unit": "ml", "canonical_id": "salt", "is_specialty": false},
+            {"raw_text": "2 cloves garlic", "metric_amount": 2.0, "unit": "pcs", "canonical_id": "garlic", "is_specialty": false},
+            {"raw_text": "1 onion", "metric_amount": 1.0, "unit": "pcs", "canonical_id": "onion", "is_specialty": false}
+        ],
+        "instructions": [{"step_number": 1, "text": "Simmer.", "timer_seconds": null}], "tags": []});
+    let (_, r) = send(&app, "POST", "/api/v1/recipes", Some(recipe), &[]).await;
+    let id = r["id"].as_str().unwrap().to_string();
+    for (lang, labels) in [
+        ("ru", ["соль", "чеснок", "лук"]),
+        ("nl", ["zout", "knoflook", "ui"]),
+        ("en", ["salt", "garlic", "onion"]),
+    ] {
+        let (_, body) = send(
+            &app,
+            "GET",
+            &format!("/api/v1/recipes/{id}?lang={lang}"),
+            None,
+            &[],
+        )
+        .await;
+        let got: Vec<&str> = body["ingredients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["canonical_label"].as_str().unwrap_or("<none>"))
+            .collect();
+        assert_eq!(got, labels, "{lang}: {body}");
+    }
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        0,
+        "no model call for seeded everyday ingredients"
+    );
+}
+
 fn dutch() -> Value {
     json!({"title": "Pho", "description": "Soep", "language": "nl", "servings": 2,
         "ingredients": [{"raw_text": "1 kg botten", "metric_amount": 1000.0, "unit": "g", "canonical_id": "beef_bones", "is_specialty": false}],
@@ -388,7 +466,10 @@ mod labels_and_search {
             &[],
         )
         .await;
-        assert_eq!(ru["ingredients"][0]["canonical_label"], "ru:beef_bones");
+        assert_eq!(
+            ru["ingredients"][0]["canonical_label"], "говяжьи кости",
+            "seeded dictionary (RN-75) answers before the model"
+        );
         let (_, src) = send(&app, "GET", &format!("/api/v1/recipes/{id}"), None, &[]).await;
         assert!(
             src["ingredients"][0].get("canonical_label").is_none(),
@@ -413,7 +494,7 @@ mod labels_and_search {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{sl}");
-        assert_eq!(sl["basic_groceries"][0]["canonical_label"], "ru:beef_bones");
+        assert_eq!(sl["basic_groceries"][0]["canonical_label"], "говяжьи кости");
         let (_, sl) = send(
             &app,
             "POST",
@@ -423,7 +504,7 @@ mod labels_and_search {
         )
         .await;
         assert_eq!(
-            sl["basic_groceries"][0]["canonical_label"], "nl:beef_bones",
+            sl["basic_groceries"][0]["canonical_label"], "runderbotten",
             "Accept-Language applies here too"
         );
     }
