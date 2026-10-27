@@ -88,9 +88,29 @@ async fn app_with(extractor: Arc<dyn RecipeExtractor>) -> (Router, PathBuf) {
             chef_name: "T".into(),
         },
     )
-    .with_importer(RecipeImporter::new(extractor))
+    // The stand-in site runs on loopback, which the SSRF guard refuses by default.
+    .with_importer(RecipeImporter::new(extractor).allow_private_hosts())
     .with_image_dir(dir.join("images"));
     (build_router(state), dir)
+}
+
+/// An app with the default, fully guarded importer.
+async fn guarded_app() -> Router {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("node-import-guarded-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Db::open(dir.join("recipes.db")).await.unwrap();
+    build_router(
+        AppState::new(
+            db,
+            NodeInfo {
+                author_did: None,
+                chef_name: "T".into(),
+            },
+        )
+        .with_image_dir(dir.join("images")),
+    )
 }
 
 async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -317,6 +337,33 @@ async fn import_url_failures_map_to_clean_errors() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn import_url_refuses_private_and_metadata_addresses() {
+    let app = guarded_app().await;
+    let base = fake_site().await;
+    for url in [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1:9/",
+        "http://localhost:9/",
+        "http://10.0.0.1/recipe",
+        format!("{base}/pho").as_str(),
+    ] {
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/api/v1/import/url",
+            Some(json!({"url": url})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{url}: {body}");
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("refusing to fetch"),
+            "{url}: error should explain the refusal, got {msg:?}"
+        );
+    }
 }
 
 fn mealie_zip() -> Vec<u8> {

@@ -280,8 +280,15 @@ CREATE VIRTUAL TABLE translations_fts USING fts5(
 ## 3. Scraper Pipeline (`crates/recipe-scraper`)
 
 `RecipeImporter` runs the following stages; the cheapest one that yields a recipe wins. Every
-user-supplied URL (page, cover, JSON-LD image) will pass an SSRF guard before it is fetched
-(RN-74, `docs/SPEC-hosted-platform.md` §6).
+user-supplied URL (page, cover, JSON-LD image) passes the SSRF guard in `recipe-scraper/src/ssrf.rs`
+before it is fetched (RN-74, `docs/SPEC-hosted-platform.md` §6): only `http`/`https`; literal IP
+hosts and every DNS answer for a hostname are refused when they are loopback, RFC 1918, carrier-grade
+NAT, link-local (cloud metadata), unique-local, multicast, unspecified or reserved, with IPv4 embedded
+in IPv6 (mapped, NAT64, 6to4) judged as IPv4. The importer's HTTP client uses the same check as its
+DNS resolver and redirect policy, so every redirect hop is checked again and the connection goes to
+the checked address. Refusals surface as `ScraperError::BlockedUrl` ("refusing to fetch …"), HTTP
+`400` on the API and an invalid-input error on MCP. `RecipeImporter::allow_private_hosts()` exists
+for tests with local stand-in sites and never unlocks link-local or multicast ranges.
 
 ### Stage 1: Fast `Schema.org/Recipe` Parsing (Zero-LLM or Micro-Normalization)
 1. Fetch the target URL HTML via `reqwest` using a browser-like `User-Agent`.

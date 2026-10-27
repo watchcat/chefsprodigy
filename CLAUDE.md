@@ -69,3 +69,4 @@ Always use these commands to verify your changes:
    - `PRAGMA foreign_keys = ON;`
    - `PRAGMA busy_timeout = 5000;`
 5. **Deterministic `content_hash`:** On every recipe creation or update, recompute `content_hash` (SHA-256 of sorted lowercase `canonical_id`s + quantities + normalized instruction text) so the future Central Aggregator can track forks and duplicates accurately.
+6. **SSRF guard on user-supplied URLs:** Every fetch of a URL that came from a user (page, cover, JSON-LD image) goes through `RecipeImporter`, whose client is built with `recipe_scraper::ssrf` (`UrlGuard`, `GuardedResolver`, `redirect_policy`). Never create a separate `reqwest::Client` for user-supplied URLs, and keep `allow_private_hosts()` out of production code paths.

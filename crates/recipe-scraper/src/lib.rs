@@ -6,7 +6,8 @@
 //! 3. Mealie `.zip` backup migrator ([`mealie`]) and cover-image conversion
 //!    ([`images`]).
 //!
-//! [`RecipeImporter`] orchestrates stages 1 and 2.
+//! [`RecipeImporter`] orchestrates stages 1 and 2; every URL it fetches passes the
+//! SSRF guard in [`ssrf`].
 
 pub mod error;
 pub mod images;
@@ -17,6 +18,7 @@ pub mod llm;
 pub mod mealie;
 pub mod normalize;
 pub mod sanitize;
+pub mod ssrf;
 
 pub use error::ScraperError;
 pub use importer::{ImportResult, RecipeImporter};
