@@ -2,15 +2,18 @@
 
 `deploy/` runs many Chef's Prodigy hubs on a single VPS: k3s (Kubernetes with Traefik,
 CoreDNS, local-path storage and network policies built in), Cloudflare in front for DNS,
-TLS and the WAF, one `StatefulSet` per hub, nightly backups to R2 and a Python tool,
+TLS and the WAF, one `StatefulSet` per hub, the `llm-gateway` that holds the model vendor
+keys and gives each hub its own token, nightly backups to R2 and a Python tool,
 `hubctl`, that drives `kubectl`. Design and rationale: [docs/SPEC-hosted-platform.md](../docs/SPEC-hosted-platform.md).
 
 ```
-hubctl init                 namespaces, network policies, Traefik config, backup CronJob
+hubctl init                 namespaces, network policies, Traefik config, backup CronJob, llm-gateway
 hubctl create jacob         Secret + StatefulSet + Service + Ingress + 2Gi volume; prints the owner key once
 hubctl list | status        hubs, URLs, pod state
 hubctl login-link jacob     10-minute magic sign-in link for the owner
 hubctl rotate-key jacob     new owner key, hub restarted
+hubctl gateway-token jacob  new llm-gateway token for the hub, hub restarted
+hubctl usage [jacob] [--from D --to D]  model requests and tokens per hub and day
 hubctl backup jacob|all     run the nightly job now and show its log
 hubctl restore jacob x.zip  replace the hub's data with an export archive
 hubctl upgrade [jacob|all]  roll hubs to HUB_IMAGE from .env, one at a time
@@ -82,7 +85,8 @@ hubctl create jacob --chef "Jacob"
 default-deny `NetworkPolicy` set in `chefs-hubs`; Traefik's `HelmChartConfig` (trusts
 Cloudflare's ranges for the visitor IP, redirects http to https, access logs off because the
 magic-link token travels in a query string), the `headers` middleware and the default
-`TLSStore`; the backup `CronJob` with its `ServiceAccount` and `Role`. `create` prints the
+`TLSStore`; the backup `CronJob` with its `ServiceAccount` and `Role`; and, when `.env` has a
+vendor key, the `llm-gateway` (next paragraph). `create` prints the
 owner key **once**, then a sign-in link; store the key in a password manager and send the
 link to the owner. Check the hub from outside:
 
@@ -97,6 +101,26 @@ curl -sS -D - -o /dev/null https://jacob.chefslegacy.com/mcp \
 The second call should answer `200` with `Content-Type: text/event-stream` and an
 `Mcp-Session-Id` header: MCP streams through Cloudflare and Traefik.
 
+**Model access.** The vendor keys from `.env` (`MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`) go only
+into the gateway's Secret `llm-gateway-env` in `chefs-system`. The gateway is a `Deployment`
+of the hub image (`/usr/local/bin/llm-gateway serve`, 64Mi limit) with `gateway.db` on its own
+1Gi volume; only hub pods may connect to it. `hubctl create` registers each hub through
+`kubectl exec deploy/llm-gateway -- llm-gateway add-hub <name>` and writes the returned token
+into the hub's Secret as `MINIMAX_API_KEY` and `ANTHROPIC_API_KEY`, with
+`MINIMAX_ANTHROPIC_API_BASE` and `ANTHROPIC_BASE_URL` set to
+`http://llm-gateway.chefs-system.svc:8080/anthropic`. The hub binary is unchanged: it simply
+talks to a different base URL with a different key. The gateway checks the token, swaps in
+the vendor key and records requests and tokens per hub and day:
+
+```sh
+hubctl usage                       # every hub, newest day first, with a total line
+hubctl usage jacob --from 2026-11-01
+```
+
+Running `hubctl create` again on a hub that was created with direct vendor access moves it
+onto the gateway. `LLM_GATEWAY=off` (or no vendor key) skips the gateway and copies the
+model settings into each hub as before. Quotas and the response cache come with RN-68.
+
 ## 4. Day to day
 
 - `hubctl list` and `hubctl status` show every hub, its URL and pod state;
@@ -109,6 +133,10 @@ The second call should answer `200` with `Content-Type: text/event-stream` and a
   the current `HUB_IMAGE`.
 - `hubctl remove jacob` deletes the workload but keeps the volume `data-hub-jacob-0`
   (`hubctl create jacob` later picks it up again, with a new key); `--purge` deletes the data.
+  The hub's gateway token is disabled either way; a later `create` issues a new one.
+- `hubctl gateway-token jacob` replaces a hub's gateway token (a leaked token, or a gateway
+  whose `gateway.db` was lost) and restarts the hub. `upgrade all` also moves the gateway to
+  the new `HUB_IMAGE`, before the hubs.
 - `hubctl render jacob` prints exactly what `create` would apply; `hubctl render all` the
   cluster objects; `deploy/k8s/` holds a generated reference copy for review.
 
@@ -138,6 +166,10 @@ It scales the hub to zero, unpacks the archive into the volume through a short-l
 pod, fixes ownership for uid 65532 and scales back up. The hub starts with the restored
 data (SQLite migrations run if the archive is older than the image).
 
+The gateway's `gateway.db` (hub token hashes and usage counters) is not part of the nightly
+backup. Losing it costs the usage history; `hubctl gateway-token <name>` for each hub
+restores model access.
+
 ## 6. Local dry run with k3d
 
 Everything above can be rehearsed on a laptop with Docker and [k3d](https://k3d.io):
@@ -156,7 +188,8 @@ k3d cluster delete chefs
 ```
 
 `TLS_MODE=off` routes hubs on Traefik's plain `web` entrypoint and gives them `http://`
-public URLs; the Host header stands in for DNS. Import images one per `k3d image import`
+public URLs; the Host header stands in for DNS. Add a vendor key and `LLM_MODEL` to the
+`.env` to rehearse the gateway as well. Import images one per `k3d image import`
 call: a multi-image import can fail with `ctr: content digest … not found` while k3d still
 reports success, and the hub then sits in `ImagePullBackOff`. The same setup verified, for RN-65, that a
 hub pod cannot reach another hub, the `chefs-system` namespace or the Kubernetes API while
@@ -174,8 +207,9 @@ remove behave as described.
 - Opens connections only to cluster DNS, to public addresses (private ranges, the node and
   the Kubernetes API are excluded) and to `llm-gateway` in `chefs-system`. The hub's own
   SSRF guard refuses private destinations as a second line.
-- Its Secret holds the owner key and model settings; `hubctl` prints keys only when they are
-  created and never logs them.
+- Its Secret holds the owner key, the model name and its own gateway token, never a vendor
+  key while the gateway runs; `hubctl` prints owner keys only when they are created and never
+  prints gateway tokens or vendor keys.
 
 ## 8. Troubleshooting
 
@@ -186,4 +220,5 @@ remove behave as described.
 | Certificate errors behind Cloudflare | Secret `chefs-origin-tls` in `kube-system`, Cloudflare mode *Full (strict)*, `kubectl -n kube-system get tlsstore default` |
 | Traefik ignores the Cloudflare ranges | `kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.template.spec.containers[0].args}'` should list them; `kubectl -n kube-system logs job/helm-install-traefik` shows chart errors |
 | Backup job fails | `hubctl backup all` prints the log; `kubectl -n chefs-system get jobs` lists past runs |
-| Hub cannot call the model | `kubectl -n chefs-hubs logs hub-<name>-0`; egress to public addresses is allowed, private ones are not |
+| Hub cannot call the model | `kubectl -n chefs-hubs logs hub-<name>-0`; then `kubectl -n chefs-system logs deploy/llm-gateway`. A 401 there means the hub's token is unknown: `hubctl gateway-token <name>` |
+| `create` stops at *llm-gateway is not ready* | `kubectl -n chefs-system describe pod -l app=llm-gateway`; the gateway needs its volume and the hub image |

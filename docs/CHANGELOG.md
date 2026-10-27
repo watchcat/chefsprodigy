@@ -2,6 +2,11 @@
 
 Stories moved out of the Kanban `Done` column, newest first. Ids are never reused.
 
+## Archived 2026-10-28
+
+### RN-50 · Kanban tooling (S)
+`scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`).
+
 ## Archived 2026-10-27
 
 ### RN-39 · UI: shopping list builder (M)

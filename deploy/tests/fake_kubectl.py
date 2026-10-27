@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """A stand-in `kubectl` for hubctl's tests: keeps applied objects in a JSON state
 file (FAKE_KUBE_STATE), logs every invocation (FAKE_LOG) and answers the handful
-of read commands hubctl uses. Pods are synthesized from stored StatefulSets.
+of read commands hubctl uses. Pods are synthesized from stored StatefulSets and
+Deployments; `exec deploy/llm-gateway -- llm-gateway …` emulates the gateway CLI
+with hub tokens and usage rows kept under the state's "_gateway" key.
 """
 
 import json
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -42,6 +45,7 @@ KINDS = {
     "persistentvolumeclaims": "PersistentVolumeClaim", "namespace": "Namespace", "namespaces": "Namespace",
     "networkpolicy": "NetworkPolicy", "networkpolicies": "NetworkPolicy", "configmap": "ConfigMap",
     "serviceaccount": "ServiceAccount", "role": "Role", "rolebinding": "RoleBinding",
+    "deployment": "Deployment", "deployments": "Deployment", "deploy": "Deployment",
     "middleware": "Middleware", "tlsstore": "TLSStore", "helmchartconfig": "HelmChartConfig",
 }
 
@@ -64,17 +68,52 @@ def matches(obj, selector):
 def synthesized_pods(state, ns):
     pods = []
     for k, obj in state.items():
-        if obj.get("kind") != "StatefulSet" or obj["metadata"].get("namespace") != ns:
+        if obj.get("kind") not in ("StatefulSet", "Deployment") or obj["metadata"].get("namespace") != ns:
             continue
         replicas = obj.get("spec", {}).get("replicas", 1)
         for i in range(replicas):
+            suffix = str(i) if obj["kind"] == "StatefulSet" else f"7f9c-{i}"
             pods.append({
                 "kind": "Pod",
-                "metadata": {"name": f"{obj['metadata']['name']}-{i}", "namespace": ns,
+                "metadata": {"name": f"{obj['metadata']['name']}-{suffix}", "namespace": ns,
                              "labels": obj["spec"]["template"]["metadata"].get("labels", {})},
                 "status": {"phase": "Running", "containerStatuses": [{"name": "node", "ready": True, "restartCount": 0}]},
             })
     return pods
+
+
+def gateway_cli(state, args):
+    """The llm-gateway subcommands hubctl runs through `kubectl exec`."""
+    gw = state.setdefault("_gateway", {"hubs": {}, "usage": []})
+    sub, rest = args[0], args[1:]
+    name = next((a for a in rest if not a.startswith("-")), None)
+    if sub == "add-hub":
+        hub = gw["hubs"].get(name)
+        if hub and "--rotate" not in rest:
+            print(f"Error: hub {name} already exists", file=sys.stderr)
+            return 1
+        token = secrets.token_hex(32)
+        created = hub["created_at"] if hub else "2026-10-27T00:00:00Z"
+        gw["hubs"][name] = {"token": token, "status": "active", "created_at": created}
+        save(state)
+        print(json.dumps({"name": name, "token": token, "created_at": created}))
+        return 0
+    if sub == "disable-hub":
+        if name in gw["hubs"]:
+            gw["hubs"][name]["status"] = "disabled"
+            save(state)
+            print(f"hub {name} disabled")
+        else:
+            print(f"hub {name} is not registered")
+        return 0
+    if sub == "usage":
+        hub, start, end = flag(rest, "--hub"), flag(rest, "--from"), flag(rest, "--to")
+        rows = [r for r in gw["usage"] if (not hub or r["hub"] == hub)
+                and (not start or r["day"] >= start) and (not end or r["day"] <= end)]
+        print(json.dumps(sorted(rows, key=lambda r: (r["day"], r["hub"]), reverse=True), indent=2))
+        return 0
+    print(f"fake llm-gateway: unsupported {args}", file=sys.stderr)
+    return 2
 
 
 def main(argv):
@@ -172,10 +211,24 @@ def main(argv):
         print("rollout ok")
         return 0
     if cmd == "wait":
+        if state.get("_fail_wait"):
+            print("error: timed out waiting for the condition", file=sys.stderr)
+            return 1
         print("condition met")
         return 0
     if cmd == "logs":
         print("fake backup log: hub demo: exported")
+        return 0
+    if cmd == "exec" and "--" in argv:
+        target = next(a for a in argv[1:argv.index("--")] if not a.startswith("-") and a != ns)
+        command = argv[argv.index("--") + 1:]
+        if command and command[0].endswith("llm-gateway"):
+            name = target.split("/", 1)[-1]
+            if key("Deployment", ns, name) not in state:
+                print(f'Error from server (NotFound): deployments.apps "{name}" not found', file=sys.stderr)
+                return 1
+            return gateway_cli(state, command[1:])
+        print("exec ok")
         return 0
     if cmd in ("cp", "exec", "run", "top", "label", "annotate"):
         print(f"{cmd} ok")

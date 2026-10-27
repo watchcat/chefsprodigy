@@ -16,10 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
-New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
-- Acceptance: a hub works unchanged with `MINIMAX_ANTHROPIC_API_BASE` pointed at the gateway; usage recorded per hub.
-
 ### RN-67 · Hub: model quota-exceeded mapping (S)
 Gateway 429/402 surfaces as a readable `model_quota_exceeded` error (HTTP 429) instead of a generic model failure.
 - Acceptance: API test with a fake extractor returning the gateway's error.
@@ -92,6 +88,13 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
+New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
+- Acceptance: a hub works unchanged with `MINIMAX_ANTHROPIC_API_BASE` pointed at the gateway; usage recorded per hub.
+
+
+- Done 2026-10-28 (k3s edition): new crate `crates/llm-gateway` (from the Compose-era `6f76639`): `/anthropic` and `/minimax` Messages passthrough, hub tokens stored as SHA-256, `usage_daily` rows, one retry on 5xx/429, two in-flight calls per hub, `stream: true` → 501, admin `/admin/hubs` and `/admin/usage`. New for k3s: CLI `add-hub [--rotate] [--json]`, `disable-hub`, `usage` (JSON) so hubctl drives the gateway through `kubectl exec` without an admin port; SIGTERM shutdown (PID 1 in a pod); input tokens now include `cache_creation_input_tokens` and `cache_read_input_tokens`, which MiniMax reports outside `input_tokens` (seen live: 697 + 128). Same image as the hubs. hubctl: `init` deploys `llm-gateway` in `chefs-system` (Secret with the vendor keys, 1Gi PVC, one-replica `Recreate` Deployment, 64Mi limit, hub hardening, env checksum on the pod template, NetworkPolicy admitting only `app=hub` pods from `chefs-hubs`) when `.env` has a vendor key (`LLM_GATEWAY=off` opts out); `create` registers the hub and writes the token plus `MINIMAX_ANTHROPIC_API_BASE`/`ANTHROPIC_BASE_URL` = `http://llm-gateway.chefs-system.svc:8080/anthropic` into its Secret instead of the vendor key, and moves direct-access hubs onto the gateway; `remove` disables the token; new `gateway-token <name>` and `usage [name] [--from --to]`; `upgrade` rolls the gateway first; `status` and `render` show it; `deploy/k8s/llm-gateway.yaml` added to the reference set. Also fixed: `init` on a fresh k3s node failed while Traefik's CRDs were still installing; it now waits for `middlewares.traefik.io`. Tests: workspace 226 passed (gateway 12 proxy + 7 CLI), clippy and rustfmt clean; deploy tests 41 passed (2 PyYAML-only skipped under `-I`, both pass with PyYAML). k3d (k3s v1.36.4), fresh cluster, 33 of 33 checks: hub Secret holds a gateway token and no vendor key; a text import through Traefik → hub → gateway → MiniMax returned 201 with canonical ids spaghetti, garlic, lemon, olive_oil, parmesan_cheese, and `hubctl usage demo` showed 1 request, 402 input and 392 output tokens; pods in `default` and unlabelled `chefs-system` pods cannot reach the gateway; bad token 401, valid token 400 on an empty body; the gateway pod stopped in 1 s on SIGTERM and kept its usage across the restart; `gateway-token` refused the old token; `upgrade` moved gateway and hub to a new tag; `remove` revoked the token and a new `create` got an active one; `kubectl apply --dry-run=server -f deploy/k8s/` accepted. Not covered: `gateway.db` is not in the nightly backup yet (re-issue with `hubctl gateway-token`); node-server still shuts down only on Ctrl-C, so hub pods wait out the 30 s grace period on restart.
 
 ### RN-65 · deploy/k8s: namespaces, policies, Traefik config, hub template, hubctl, backup CronJob (M)
 k3s + Traefik + `kubectl` per `docs/SPEC-hosted-platform.md` §3, §4.7, §5.5, §5.6: `deploy/k8s/` with the `chefs-system` and `chefs-hubs` namespaces, default-deny `NetworkPolicy` in `chefs-hubs` (ingress from Traefik and the platform only; egress to DNS, public addresses and `llm-gateway`), the Traefik `HelmChartConfig` (Cloudflare trusted IPs, Origin CA default `TLSStore`, `headers` middleware, access logs off), the per-hub template (`StatefulSet` + `Secret` + `Service` + `Ingress` + PVC, non-root, read-only, probes on `/api/v1/health`), the nightly backup `CronJob` to R2 via rclone, and `hubctl` (Python, standard library, drives `kubectl`: init, create, remove, list, status, rotate-key, login-link, backup, restore, upgrade) plus a how-to for a fresh k3s node behind Cloudflare.
@@ -167,6 +170,3 @@ Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pa
 
 ### RN-49 · Navbar logo and PWA icons (S)
 PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and service-worker shell updated.
-
-### RN-50 · Kanban tooling (S)
-`scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`).

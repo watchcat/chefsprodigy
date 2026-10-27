@@ -39,7 +39,8 @@ Strictly adhere to the following modular Workspace layout:
 │   ├── recipe-db/              # sqlx SQLite pool, repositories, FTS5 search queries
 │   ├── recipe-scraper/         # Schema.org parser + htmd + rig structured-output extractor + Mealie (.zip) importer
 │   ├── recipe-mcp/             # MCP Tools + shared ImportService (rig agents consume the MCP tools via the rig-rmcp crate)
-│   └── node-server/            # Binary: Axum HTTP/SSE server, CLI (stdio MCP mode), rust-embed static UI
+│   ├── node-server/            # Binary: Axum HTTP/SSE server, CLI (stdio MCP mode), rust-embed static UI
+│   └── llm-gateway/            # Binary: LLM gateway for hosted hubs (vendor key custody, hub tokens, usage; Messages passthrough)
 ├── frontend/                   # Lightweight UI (PWA, Cook Mode with WakeLock API)
 └── deploy/                     # k3s hosting: hubctl (Python, drives kubectl), generated reference manifests in k8s/, how-to
 ```
@@ -54,6 +55,7 @@ Always use these commands to verify your changes:
 - **Run tests:** `cargo test --workspace`
 - **Run node as HTTP server:** `cargo run -p node-server -- serve --port 8080`
 - **Run node in local MCP (stdio) mode:** `cargo run -p node-server -- mcp-stdio`
+- **Run the LLM gateway:** `cargo run -p llm-gateway -- serve --port 8090` (vendor keys and `GATEWAY_ADMIN_TOKEN` from the environment; `llm-gateway add-hub <name>` prints a hub token). A hub uses it by setting `MINIMAX_ANTHROPIC_API_BASE=http://<gateway>/anthropic` and `MINIMAX_API_KEY=<hub token>` (for Anthropic models `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`). On k3s `hubctl` runs it as `deploy/llm-gateway` in `chefs-system` and drives `add-hub --rotate --json`, `disable-hub` and `usage` through `kubectl exec`.
 - **Backfill source languages:** `cargo run -p node-server -- backfill-language` (also runs in the background at `serve` startup)
 - **Container image:** `docker build -t chefsprodigy .` (distroless, non-root, `/data` volume, `TOKIO_WORKER_THREADS=2`). Its `HEALTHCHECK` runs `node-server healthcheck [--port]`, a loopback probe of `/api/v1/health` that exits 0 or 1, so the image needs no curl. Tags `v*` publish `ghcr.io/watchcat/chefsprodigy` through `.github/workflows/docker.yml`.
 - **Hosting tooling (k3s):** `python3 -I -m unittest discover -s deploy/tests` runs `deploy/hubctl` against a fake kubectl and checks that `deploy/k8s/*.yaml` equal `deploy/hubctl render --reference deploy/k8s`; regenerate them after changing hubctl. `deploy/README.md` §6 has the k3d dry run; hub Ingresses carry only the `headers` middleware because Traefik's `buffering` stalls `/mcp` event streams.

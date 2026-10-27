@@ -82,8 +82,12 @@ class HubctlCase(unittest.TestCase):
     def calls(self):
         return [l for l in self.log.read_text().splitlines() if l]
 
-    def objects(self):
+    def raw_state(self):
         return json.loads(self.state.read_text()) if self.state.exists() else {}
+
+    def objects(self):
+        """Cluster objects only; the fake gateway's bookkeeping lives under "_gateway"."""
+        return {k: v for k, v in self.raw_state().items() if not k.startswith("_")}
 
     def obj(self, kind, ns, name):
         return self.objects()[f"{kind.lower()}/{ns}/{name}"]
@@ -138,6 +142,28 @@ class Init(HubctlCase):
         self.assertIn("rolebinding/chefs-hubs/hub-backup-reads-secrets", objs)
         self.assertFalse(any(k.startswith("tlsstore/") for k in objs), "no TLS store in TLS_MODE=off")
 
+    def test_init_waits_for_traefiks_crds_before_applying_middlewares(self):
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        calls = self.calls()
+        wait = next(i for i, c in enumerate(calls) if "wait --for=condition=established crd/middlewares.traefik.io" in c)
+        applies = [i for i, c in enumerate(calls) if c.startswith("apply")]
+        self.assertLess(applies[0], wait, "namespaces first")
+        self.assertLess(wait, applies[1], "the Middleware is applied after the CRD exists")
+
+    def test_init_explains_a_traefik_that_is_still_installing(self):
+        state = self.raw_state()
+        state["_fail_wait"] = True
+        self.state.write_text(json.dumps(state))
+        saved, hubctl.CRD_WAIT_SECONDS = hubctl.CRD_WAIT_SECONDS, 0
+        try:
+            code, out = self.run_hubctl("init")
+        finally:
+            hubctl.CRD_WAIT_SECONDS = saved
+        self.assertNotEqual(code, 0)
+        self.assertIn("Traefik", out)
+        self.assertIn("helm-install-traefik", out)
+
     def test_origin_mode_needs_the_origin_ca_secret_and_installs_the_default_tls_store(self):
         self.write_env(TLS_MODE="origin")
         code, out = self.run_hubctl("init")
@@ -174,8 +200,8 @@ class Create(HubctlCase):
         self.assertRegex(data["NODE_API_KEY"], r"^[0-9a-f]{64}$")
         self.assertEqual(data["NODE_CHEF_NAME"], "Demo Chef")
         self.assertEqual(data["NODE_PUBLIC_URL"], "http://demo.example.test")
-        self.assertEqual(data["LLM_MODEL"], "minimax/MiniMax-M3", "phase 0 copies the model settings")
-        self.assertEqual(data["MINIMAX_API_KEY"], "vendor-key-for-tests")
+        self.assertEqual(data["LLM_MODEL"], "minimax/MiniMax-M3", "the model setting is copied")
+        self.assertNotIn("vendor-key-for-tests", json.dumps(data), "the vendor key stays in the gateway")
         self.assertIn(data["NODE_API_KEY"], out, "the owner key is printed once")
 
         sts = self.obj("StatefulSet", "chefs-hubs", "hub-demo")
@@ -342,7 +368,7 @@ class RemoveUpgradeStatus(HubctlCase):
         for name in ("jacob", "maria"):
             sts = self.obj("StatefulSet", "chefs-hubs", f"hub-{name}")
             self.assertEqual(sts["spec"]["template"]["spec"]["containers"][0]["image"], "ghcr.io/example/hub:2.0.0")
-        self.assertEqual(len([c for c in self.calls() if "rollout status" in c]), 2)
+        self.assertEqual(len([c for c in self.calls() if "rollout status statefulset" in c]), 2)
 
     def test_status_reports_pod_readiness(self):
         self.run_hubctl("create", "demo")
@@ -353,13 +379,191 @@ class RemoveUpgradeStatus(HubctlCase):
 
 
 
+GATEWAY_BASE = "http://llm-gateway.chefs-system.svc:8080/anthropic"
+
+
+class Gateway(HubctlCase):
+    def gateway_state(self):
+        return self.raw_state().get("_gateway", {"hubs": {}, "usage": []})
+
+    def test_init_deploys_the_gateway_with_the_vendor_keys(self):
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("vendor-key-for-tests", out, "vendor keys are never printed")
+        secret = self.obj("Secret", "chefs-system", "llm-gateway-env")
+        self.assertEqual(secret["stringData"]["MINIMAX_API_KEY"], "vendor-key-for-tests")
+        self.assertNotIn("LLM_MODEL", secret["stringData"], "only gateway settings go in the gateway Secret")
+        pvc = self.obj("PersistentVolumeClaim", "chefs-system", "llm-gateway-data")
+        self.assertEqual(pvc["spec"]["storageClassName"], "local-path")
+        dep = self.obj("Deployment", "chefs-system", "llm-gateway")
+        self.assertEqual(dep["spec"]["strategy"], {"type": "Recreate"}, "one SQLite writer at a time")
+        pod = dep["spec"]["template"]["spec"]
+        self.assertEqual(dep["spec"]["template"]["metadata"]["labels"]["app"], "llm-gateway",
+                         "the hub egress policy selects this label")
+        c = pod["containers"][0]
+        self.assertEqual(c["image"], "ghcr.io/example/hub:1.2.3", "same image as the hubs")
+        self.assertEqual(c["command"], ["/usr/local/bin/llm-gateway"])
+        self.assertEqual(c["args"], ["serve"])
+        self.assertEqual(c["envFrom"], [{"secretRef": {"name": "llm-gateway-env"}}])
+        self.assertEqual(c["readinessProbe"]["httpGet"]["path"], "/health")
+        self.assertEqual(c["resources"]["limits"]["memory"], "64Mi")
+        self.assertTrue(c["securityContext"]["readOnlyRootFilesystem"])
+        self.assertFalse(pod["automountServiceAccountToken"])
+        svc = self.obj("Service", "chefs-system", "llm-gateway")
+        self.assertEqual(svc["spec"]["ports"][0]["port"], 8080)
+        policy = self.obj("NetworkPolicy", "chefs-system", "llm-gateway-ingress")
+        self.assertEqual(policy["spec"]["podSelector"], {"matchLabels": {"app": "llm-gateway"}})
+        froms = json.dumps(policy["spec"]["ingress"])
+        self.assertIn("chefs-hubs", froms)
+        self.assertIn('"app": "hub"', froms, "only hub pods may call the gateway")
+
+    def test_admin_token_and_upstream_overrides_reach_the_gateway(self):
+        self.write_env(GATEWAY_ADMIN_TOKEN="admin-secret", MINIMAX_ANTHROPIC_API_BASE="https://api.minimaxi.com/anthropic",
+                       ANTHROPIC_API_KEY="anthropic-vendor-key")
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        data = self.obj("Secret", "chefs-system", "llm-gateway-env")["stringData"]
+        self.assertEqual(data["GATEWAY_ADMIN_TOKEN"], "admin-secret")
+        self.assertEqual(data["MINIMAX_ANTHROPIC_API_BASE"], "https://api.minimaxi.com/anthropic")
+        self.assertEqual(data["ANTHROPIC_API_KEY"], "anthropic-vendor-key")
+
+    def test_create_registers_the_hub_and_gives_it_a_gateway_token(self):
+        self.write_env(LLM_API_KEY="generic-vendor-key")
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        data = self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]
+        token = self.gateway_state()["hubs"]["demo"]["token"]
+        self.assertEqual(data["MINIMAX_API_KEY"], token)
+        self.assertEqual(data["ANTHROPIC_API_KEY"], token, "Anthropic models go through the gateway too")
+        self.assertEqual(data["MINIMAX_ANTHROPIC_API_BASE"], GATEWAY_BASE)
+        self.assertEqual(data["ANTHROPIC_BASE_URL"], GATEWAY_BASE)
+        self.assertNotIn("LLM_API_KEY", data, "a generic key would override the gateway token")
+        self.assertNotIn("vendor-key", json.dumps(data))
+        self.assertNotIn(token, out, "the hub token is not printed")
+        calls = self.calls()
+        rollout = next(i for i, c in enumerate(calls) if "rollout status deployment/llm-gateway" in c)
+        register = next(i for i, c in enumerate(calls) if "add-hub demo --rotate --json" in c)
+        self.assertLess(rollout, register, "the gateway is ready before hubctl registers the hub")
+
+    def test_create_again_keeps_the_gateway_token(self):
+        self.run_hubctl("create", "demo")
+        token = self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]["MINIMAX_API_KEY"]
+        self.log.write_text("")
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]["MINIMAX_API_KEY"], token)
+        self.assertFalse(any("add-hub" in c for c in self.calls()), self.calls())
+
+    def test_create_moves_a_direct_hub_onto_the_gateway(self):
+        self.write_env(LLM_GATEWAY="off", LLM_API_KEY="generic-vendor-key")
+        self.run_hubctl("create", "demo")
+        data = self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]
+        self.assertEqual(data["MINIMAX_API_KEY"], "vendor-key-for-tests", "LLM_GATEWAY=off: direct vendor access")
+        self.write_env()
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        data = self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]
+        self.assertEqual(data["MINIMAX_API_KEY"], self.gateway_state()["hubs"]["demo"]["token"])
+        self.assertEqual(data["MINIMAX_ANTHROPIC_API_BASE"], GATEWAY_BASE)
+        self.assertNotIn("LLM_API_KEY", data)
+        self.assertNotIn("vendor-key", json.dumps(data))
+
+    def test_gateway_off_keeps_direct_vendor_access_and_deploys_no_gateway(self):
+        self.write_env(LLM_GATEWAY="off")
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("deployment/chefs-system/llm-gateway", self.objects())
+        data = self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]
+        self.assertEqual(data["MINIMAX_API_KEY"], "vendor-key-for-tests")
+        self.assertNotIn("MINIMAX_ANTHROPIC_API_BASE", data)
+
+    def test_without_a_vendor_key_there_is_no_gateway(self):
+        self.write_env(MINIMAX_API_KEY=None)
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("deployment/chefs-system/llm-gateway", self.objects())
+        self.assertNotIn("MINIMAX_API_KEY", self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"])
+
+    def test_remove_disables_the_hub_at_the_gateway(self):
+        self.run_hubctl("create", "demo")
+        code, out = self.run_hubctl("remove", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.gateway_state()["hubs"]["demo"]["status"], "disabled")
+        self.assertIn("gateway token revoked", out)
+
+    def test_gateway_token_issues_a_new_token_and_restarts_the_hub(self):
+        self.run_hubctl("create", "demo")
+        old = self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]["MINIMAX_API_KEY"]
+        self.log.write_text("")
+        code, out = self.run_hubctl("gateway-token", "demo")
+        self.assertEqual(code, 0, out)
+        data = self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]
+        self.assertNotEqual(data["MINIMAX_API_KEY"], old)
+        self.assertEqual(data["MINIMAX_API_KEY"], self.gateway_state()["hubs"]["demo"]["token"])
+        self.assertEqual(data["ANTHROPIC_API_KEY"], data["MINIMAX_API_KEY"])
+        self.assertTrue(any("rollout restart statefulset/hub-demo" in c for c in self.calls()), self.calls())
+        code, out = self.run_hubctl("gateway-token", "ghost")
+        self.assertNotEqual(code, 0)
+        self.assertIn("does not exist", out)
+
+    def test_usage_prints_the_gateway_rows(self):
+        self.run_hubctl("create", "jacob")
+        state = self.raw_state()
+        state["_gateway"]["usage"] = [
+            {"hub": "jacob", "day": "2026-10-27", "requests": 3, "input_tokens": 690, "output_tokens": 879, "cost_cents": 0.0},
+            {"hub": "maria", "day": "2026-10-27", "requests": 1, "input_tokens": 10, "output_tokens": 20, "cost_cents": 0.0},
+            {"hub": "jacob", "day": "2026-10-20", "requests": 9, "input_tokens": 1, "output_tokens": 1, "cost_cents": 0.0},
+        ]
+        self.state.write_text(json.dumps(state))
+        code, out = self.run_hubctl("usage", "jacob", "--from", "2026-10-21")
+        self.assertEqual(code, 0, out)
+        self.assertIn("2026-10-27", out)
+        self.assertIn("690", out)
+        self.assertNotIn("maria", out)
+        self.assertNotIn("2026-10-20", out)
+        self.assertTrue(any("usage --hub jacob --from 2026-10-21" in c for c in self.calls()), self.calls())
+        code, out = self.run_hubctl("usage")
+        self.assertEqual(code, 0, out)
+        self.assertIn("maria", out)
+        self.assertRegex(out, r"total\s+13\s", "a totals line sums the requests")
+
+    def test_usage_needs_the_gateway(self):
+        self.write_env(LLM_GATEWAY="off")
+        code, out = self.run_hubctl("usage")
+        self.assertNotEqual(code, 0)
+        self.assertIn("gateway", out)
+
+    def test_upgrade_moves_the_gateway_to_the_new_image(self):
+        self.run_hubctl("create", "demo")
+        self.write_env(HUB_IMAGE="ghcr.io/example/hub:2.0.0")
+        code, out = self.run_hubctl("upgrade")
+        self.assertEqual(code, 0, out)
+        dep = self.obj("Deployment", "chefs-system", "llm-gateway")
+        self.assertEqual(dep["spec"]["template"]["spec"]["containers"][0]["image"], "ghcr.io/example/hub:2.0.0")
+        self.assertIn("llm-gateway", out)
+
+    def test_status_shows_the_gateway(self):
+        self.run_hubctl("create", "demo")
+        code, out = self.run_hubctl("status")
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r"llm-gateway\s+.*Running ready")
+
+    def test_render_all_shows_the_gateway_without_vendor_keys(self):
+        code, out = self.run_hubctl("render", "--json", "all")
+        self.assertEqual(code, 0, out)
+        names = {(i["kind"], i["metadata"]["name"]) for i in json.loads(out)["items"]}
+        self.assertIn(("Deployment", "llm-gateway"), names)
+        self.assertNotIn("vendor-key-for-tests", out, "render masks the gateway's vendor keys")
+
+
 try:  # PyYAML is optional: when present the emitted YAML is parsed back and compared.
     import yaml  # type: ignore
 except ImportError:  # pragma: no cover
     yaml = None
 
 K8S_DIR = HERE.parent / "k8s"
-REFERENCE_FILES = ["namespaces.yaml", "network-policies.yaml", "traefik-config.yaml", "backup-cronjob.yaml", "hub.example.yaml"]
+REFERENCE_FILES = ["namespaces.yaml", "network-policies.yaml", "traefik-config.yaml", "backup-cronjob.yaml",
+                   "llm-gateway.yaml", "hub.example.yaml"]
 
 
 class Render(HubctlCase):
@@ -411,6 +615,12 @@ class Render(HubctlCase):
         self.assertNotRegex(hub, r"[0-9a-f]{64}", "no real key in the example")
         backup = (out_dir / "backup-cronjob.yaml").read_text()
         self.assertNotIn("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY", backup, "no credentials in the reference set")
+        gateway = (out_dir / "llm-gateway.yaml").read_text()
+        for kind in ("Secret", "PersistentVolumeClaim", "Deployment", "Service", "NetworkPolicy"):
+            self.assertIn(f"kind: {kind}\n", gateway)
+        self.assertNotRegex(gateway, r"[0-9a-f]{64}", "no real key in the gateway example")
+        self.assertIn('MINIMAX_ANTHROPIC_API_BASE: "http://llm-gateway.chefs-system.svc:8080/anthropic"', hub,
+                      "the example hub talks to the gateway")
 
     @unittest.skipUnless(yaml, "PyYAML not installed")
     def test_reference_files_parse_as_yaml(self):

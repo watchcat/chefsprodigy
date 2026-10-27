@@ -5,14 +5,16 @@ Standard library only; drives `kubectl`. See docs/SPEC-hosted-platform.md
 section 5.6 and deploy/README.md. Settings live in ``<root>/.env`` (``--root``,
 ``HUBCTL_ROOT`` or /srv/chefslegacy); everything else lives in the cluster:
 
-    chefs-system   Traefik middlewares, the backup CronJob and its RBAC,
-                   the R2 credentials Secret (later: llm-gateway, platform, provisioner)
+    chefs-system   Traefik middlewares, the backup CronJob and its RBAC, the R2
+                   credentials Secret, the llm-gateway (Deployment, Service, PVC,
+                   Secret with the vendor keys); later: platform, provisioner
     chefs-hubs     one Secret + StatefulSet + Service + Ingress + PVC per hub,
                    default-deny NetworkPolicies
     kube-system    Traefik's HelmChartConfig and the Origin CA default TLSStore
 
 Commands: init, create, remove [--purge], list, status, rotate-key, login-link,
-backup <name|all>, restore <name> <archive>, upgrade [name|all],
+gateway-token <name>, usage [name] [--from --to], backup <name|all>,
+restore <name> <archive>, upgrade [name|all],
 render [name|all] [--json] (what would be applied) and render --reference DIR (the
 checked-in deploy/k8s/*.yaml set, regenerated whenever the manifests change).
 Tests: python3 -I -m unittest discover -s deploy/tests
@@ -49,10 +51,31 @@ RESERVED_NAMES = {
 NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 MAGIC_PREFIX = "chefsprodigy-magic:"
 MAGIC_TTL_SECONDS = 600
+CRD_WAIT_SECONDS = 180
+# Copied into a hub's Secret when it calls the vendor directly (LLM_GATEWAY=off or no vendor key).
 HUB_ENV_PASSTHROUGH = (
     "LLM_MODEL", "LLM_API_KEY", "MINIMAX_API_KEY", "MINIMAX_ANTHROPIC_API_BASE",
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "RUST_LOG",
 )
+# The llm-gateway (spec 5.2) holds the vendor keys; hubs get a per-hub token instead.
+GATEWAY = "llm-gateway"
+GATEWAY_URL = f"http://{GATEWAY}.chefs-system.svc:8080"
+GATEWAY_HUB_BASE = f"{GATEWAY_URL}/anthropic"   # rig appends /v1/messages
+GATEWAY_BIN = "/usr/local/bin/llm-gateway"
+GATEWAY_VENDOR_KEYS = ("MINIMAX_API_KEY", "ANTHROPIC_API_KEY")
+GATEWAY_ENV_KEYS = GATEWAY_VENDOR_KEYS + (
+    "MINIMAX_ANTHROPIC_API_BASE", "ANTHROPIC_API_BASE", "GATEWAY_ADMIN_TOKEN",
+    "GATEWAY_LOG_CONTENT", "GATEWAY_UPSTREAM_TIMEOUT_SECS", "RUST_LOG",
+)
+# What a gateway-served hub gets from .env, and the direct-access settings it must not keep
+# (LLM_API_KEY would override the gateway token in rig).
+HUB_ENV_PASSTHROUGH_GATEWAY = ("LLM_MODEL", "RUST_LOG")
+HUB_DIRECT_KEYS = (
+    "LLM_API_KEY", "MINIMAX_API_KEY", "MINIMAX_ANTHROPIC_API_BASE", "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL", "OPENAI_API_KEY",
+)
+GATEWAY_PLACEHOLDER = "<copied from .env by hubctl init>"
+HUB_TOKEN_PLACEHOLDER = "<hub token issued by llm-gateway at hubctl create>"
 # Only `headers`: Traefik's buffering middleware captures whole responses before forwarding
 # them and stalls the /mcp event stream (seen in the k3d test); size limits live in the hub.
 MIDDLEWARES = "chefs-system-headers@kubernetescrd"
@@ -292,6 +315,9 @@ class Config:
         self.r2_account_id = e.get("R2_ACCOUNT_ID", "")
         self.r2_access_key_id = e.get("R2_ACCESS_KEY_ID", "")
         self.r2_secret_access_key = e.get("R2_SECRET_ACCESS_KEY", "")
+        self.llm_gateway = e.get("LLM_GATEWAY", "on").strip().lower()
+        self.gateway_storage = e.get("GATEWAY_STORAGE", "1Gi")
+        self.gateway_mem_limit = e.get("GATEWAY_MEM_LIMIT", "64Mi")
 
     def require(self) -> None:
         env_path = self.root / ".env"
@@ -314,6 +340,19 @@ class Config:
     def r2_configured(self) -> bool:
         return bool(self.r2_bucket and self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key)
 
+    @property
+    def gateway_enabled(self) -> bool:
+        """The gateway runs when .env holds a vendor key it can serve, unless LLM_GATEWAY=off."""
+        return self.llm_gateway != "off" and any(self.env.get(k) for k in GATEWAY_VENDOR_KEYS)
+
+    def gateway_env(self) -> Dict[str, str]:
+        return {k: self.env[k] for k in GATEWAY_ENV_KEYS if self.env.get(k)}
+
+    def gateway_placeholder_env(self) -> Dict[str, str]:
+        """The gateway Secret as `render` shows it: vendor keys and the admin token masked."""
+        masked = set(GATEWAY_VENDOR_KEYS) | {"GATEWAY_ADMIN_TOKEN"}
+        return {k: (GATEWAY_PLACEHOLDER if k in masked else v) for k, v in self.gateway_env().items()}
+
     @classmethod
     def example(cls) -> "Config":
         """Production-shaped settings for the reference manifests in deploy/k8s (no secrets)."""
@@ -322,6 +361,7 @@ class Config:
             "HUB_IMAGE": "ghcr.io/watchcat/chefsprodigy:latest",
             "TLS_MODE": "origin",
             "LLM_MODEL": "minimax/MiniMax-M3",
+            "MINIMAX_API_KEY": GATEWAY_PLACEHOLDER,
         })
 
     def host(self, name: str) -> str:
@@ -379,15 +419,15 @@ class Kube:
     def scale(self, statefulset: str, namespace: str, replicas: int) -> None:
         self.run("scale", f"statefulset/{statefulset}", "-n", namespace, f"--replicas={replicas}")
 
-    def rollout_status(self, statefulset: str, namespace: str, timeout: str = "180s") -> bool:
-        result = self.run("rollout", "status", f"statefulset/{statefulset}", "-n", namespace, f"--timeout={timeout}", check=False)
+    def rollout_status(self, name: str, namespace: str, timeout: str = "180s", kind: str = "statefulset") -> bool:
+        result = self.run("rollout", "status", f"{kind}/{name}", "-n", namespace, f"--timeout={timeout}", check=False)
         return result.returncode == 0
 
-    def rollout_restart(self, statefulset: str, namespace: str) -> None:
-        self.run("rollout", "restart", f"statefulset/{statefulset}", "-n", namespace)
+    def rollout_restart(self, name: str, namespace: str, kind: str = "statefulset") -> None:
+        self.run("rollout", "restart", f"{kind}/{name}", "-n", namespace)
 
-    def set_image(self, statefulset: str, namespace: str, image: str) -> None:
-        self.run("set", "image", f"statefulset/{statefulset}", f"node={image}", "-n", namespace)
+    def set_image(self, name: str, namespace: str, image: str, kind: str = "statefulset", container: str = "node") -> None:
+        self.run("set", "image", f"{kind}/{name}", f"{container}={image}", "-n", namespace)
 
     def pods(self, namespace: str, selector: str) -> List[dict]:
         return self.list("pods", namespace, selector)
@@ -670,6 +710,101 @@ def hub_manifests(cfg: Config, name: str, values: Dict[str, str]) -> List[dict]:
     ]
 
 
+def gateway_manifests(cfg: Config, values: Dict[str, str]) -> List[dict]:
+    """Secret + PVC + Deployment + Service + ingress NetworkPolicy for the llm-gateway (spec 5.2).
+    Same image as the hubs; one replica with Recreate, because gateway.db is SQLite on a
+    ReadWriteOnce volume. A checksum of the Secret on the pod template restarts the gateway
+    when a vendor key in .env changes."""
+    labels = {"app": GATEWAY}
+    checksum = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:16]
+    return [
+        {
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": meta(f"{GATEWAY}-env", NS_SYSTEM, labels),
+            "type": "Opaque",
+            "stringData": dict(values),
+        },
+        {
+            "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": meta(f"{GATEWAY}-data", NS_SYSTEM, labels),
+            "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": "local-path",
+                     "resources": {"requests": {"storage": cfg.gateway_storage}}},
+        },
+        {
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": meta(GATEWAY, NS_SYSTEM, labels),
+            "spec": {
+                "replicas": 1,
+                "strategy": {"type": "Recreate"},
+                "selector": {"matchLabels": labels},
+                "template": {
+                    "metadata": {"labels": labels, "annotations": {"chefsprodigy/env-checksum": checksum}},
+                    "spec": {
+                        "automountServiceAccountToken": False,
+                        "securityContext": {
+                            "runAsNonRoot": True, "runAsUser": HUB_UID, "runAsGroup": HUB_UID,
+                            "fsGroup": HUB_UID, "seccompProfile": {"type": "RuntimeDefault"},
+                        },
+                        "containers": [{
+                            "name": "gateway",
+                            "image": cfg.hub_image,
+                            "command": [GATEWAY_BIN],
+                            "args": ["serve"],
+                            "env": [
+                                {"name": "GATEWAY_PORT", "value": "8080"},
+                                {"name": "GATEWAY_DATA_DIR", "value": "/data"},
+                                {"name": "TOKIO_WORKER_THREADS", "value": "2"},
+                            ],
+                            "envFrom": [{"secretRef": {"name": f"{GATEWAY}-env"}}],
+                            "ports": [{"containerPort": 8080, "name": "http"}],
+                            "volumeMounts": [
+                                {"name": "data", "mountPath": "/data"},
+                                {"name": "tmp", "mountPath": "/tmp"},
+                            ],
+                            "resources": {
+                                "requests": {"cpu": "50m", "memory": "24Mi"},
+                                "limits": {"cpu": "500m", "memory": cfg.gateway_mem_limit},
+                            },
+                            "securityContext": {
+                                "readOnlyRootFilesystem": True,
+                                "allowPrivilegeEscalation": False,
+                                "capabilities": {"drop": ["ALL"]},
+                            },
+                            "readinessProbe": {"httpGet": {"path": "/health", "port": "http"}, "periodSeconds": 10},
+                            "livenessProbe": {"httpGet": {"path": "/health", "port": "http"},
+                                              "periodSeconds": 30, "failureThreshold": 3},
+                        }],
+                        "volumes": [
+                            {"name": "data", "persistentVolumeClaim": {"claimName": f"{GATEWAY}-data"}},
+                            {"name": "tmp", "emptyDir": {}},
+                        ],
+                    },
+                },
+            },
+        },
+        {
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": meta(GATEWAY, NS_SYSTEM, labels),
+            "spec": {"selector": labels, "ports": [{"name": "http", "port": 8080, "targetPort": "http"}]},
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": meta(f"{GATEWAY}-ingress", NS_SYSTEM),
+            "spec": {
+                "podSelector": {"matchLabels": labels},
+                "policyTypes": ["Ingress"],
+                "ingress": [{
+                    "from": [{
+                        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": NS_HUBS}},
+                        "podSelector": {"matchLabels": {"app": "hub"}},
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 8080}],
+                }],
+            },
+        },
+    ]
+
+
 def restore_pod(name: str) -> dict:
     return {
         "apiVersion": "v1", "kind": "Pod",
@@ -698,6 +833,18 @@ def hub_names(kube: Kube) -> List[str]:
     return sorted(s["metadata"].get("labels", {}).get("hub", "") for s in secrets_ if s["metadata"].get("labels", {}).get("hub"))
 
 
+def wait_for_traefik_crds(kube: Kube) -> bool:
+    """On a fresh node k3s installs Traefik's CRDs through a Helm job a minute or so after
+    boot. `kubectl wait` fails at once while the CRD does not exist, so retry until the deadline."""
+    deadline = time.monotonic() + CRD_WAIT_SECONDS
+    while True:
+        if kube.wait("condition=established", "crd/middlewares.traefik.io", NS_TRAEFIK, "30s"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(5)
+
+
 def ensure_base(cfg: Config, kube: Kube) -> None:
     cfg.require()
     if cfg.tls and kube.get("secret", ORIGIN_TLS_SECRET, NS_TRAEFIK) is None:
@@ -707,7 +854,65 @@ def ensure_base(cfg: Config, kube: Kube) -> None:
             "--key=origin.key); see deploy/README.md, or set TLS_MODE=off for a local test"
         )
     kube.apply(namespaces())
+    if not wait_for_traefik_crds(kube):
+        raise HubctlError(
+            "Traefik's CRDs (middlewares.traefik.io) are not installed yet; k3s may still be installing "
+            f"Traefik: kubectl -n {NS_TRAEFIK} get jobs (helm-install-traefik-crd, helm-install-traefik), "
+            "then run this command again"
+        )
     kube.apply(network_policies() + traefik_config(cfg) + backup_manifests(cfg))
+    if cfg.gateway_enabled:
+        kube.apply(gateway_manifests(cfg, cfg.gateway_env()))
+
+
+# ----------------------------------------------------------------------------- gateway
+
+
+def gateway_cli(kube: Kube, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Run the llm-gateway CLI inside its pod: it opens the same gateway.db as the server."""
+    return kube.run("exec", f"deploy/{GATEWAY}", "-n", NS_SYSTEM, "--", GATEWAY_BIN, *args, check=check)
+
+
+def gateway_installed(kube: Kube) -> bool:
+    return kube.get("deployment", GATEWAY, NS_SYSTEM) is not None
+
+
+def issue_gateway_token(kube: Kube, name: str) -> str:
+    """Register the hub at the gateway, or give it a new token (the old one stops working)."""
+    if not kube.rollout_status(GATEWAY, NS_SYSTEM, "120s", kind="deployment"):
+        raise HubctlError(f"{GATEWAY} is not ready; kubectl -n {NS_SYSTEM} logs deploy/{GATEWAY}")
+    out = gateway_cli(kube, "add-hub", name, "--rotate", "--json").stdout.strip().splitlines()
+    try:
+        return json.loads(out[-1])["token"]
+    except (IndexError, ValueError, KeyError) as e:
+        raise HubctlError(f"unexpected answer from {GATEWAY} add-hub: {e}") from None
+
+
+def use_gateway_token(values: Dict[str, str], token: str) -> None:
+    """Point both Messages-format vendors rig knows (MiniMax, Anthropic) at the gateway."""
+    for key in HUB_DIRECT_KEYS:
+        values.pop(key, None)
+    values["MINIMAX_ANTHROPIC_API_BASE"] = GATEWAY_HUB_BASE
+    values["MINIMAX_API_KEY"] = token
+    values["ANTHROPIC_BASE_URL"] = GATEWAY_HUB_BASE
+    values["ANTHROPIC_API_KEY"] = token
+
+
+def wire_model_access(cfg: Config, kube: Kube, name: str, values: Dict[str, str]) -> None:
+    on_gateway = values.get("MINIMAX_ANTHROPIC_API_BASE") == GATEWAY_HUB_BASE and bool(values.get("MINIMAX_API_KEY"))
+    if cfg.gateway_enabled:
+        for key in HUB_ENV_PASSTHROUGH_GATEWAY:
+            if key not in values and cfg.env.get(key):
+                values[key] = cfg.env[key]
+        token = values["MINIMAX_API_KEY"] if on_gateway else issue_gateway_token(kube, name)
+        use_gateway_token(values, token)
+        return
+    if on_gateway:  # the gateway was switched off: back to direct vendor access
+        for key in HUB_DIRECT_KEYS:
+            values.pop(key, None)
+    for key in HUB_ENV_PASSTHROUGH:
+        if key not in values and cfg.env.get(key):
+            values[key] = cfg.env[key]
 
 
 def placeholder_values(cfg: Config, name: str) -> Dict[str, str]:
@@ -722,7 +927,10 @@ def placeholder_values(cfg: Config, name: str) -> Dict[str, str]:
     }
     if cfg.env.get("LLM_MODEL"):
         values["LLM_MODEL"] = cfg.env["LLM_MODEL"]
-        values["MINIMAX_API_KEY"] = "<vendor key copied from .env until llm-gateway issues hub tokens (RN-66)>"
+    if cfg.gateway_enabled:
+        use_gateway_token(values, HUB_TOKEN_PLACEHOLDER)
+    elif cfg.env.get("LLM_MODEL"):
+        values["MINIMAX_API_KEY"] = "<vendor key copied from .env (LLM_GATEWAY=off)>"
     return values
 
 
@@ -743,6 +951,7 @@ def reference_manifests(cfg: Config) -> Dict[str, str]:
         "network-policies.yaml": yaml_documents(network_policies(), header),
         "traefik-config.yaml": yaml_documents(traefik_config(cfg), header),
         "backup-cronjob.yaml": yaml_documents(backup_manifests(cfg), header),
+        "llm-gateway.yaml": yaml_documents(gateway_manifests(cfg, cfg.gateway_placeholder_env()), header),
         "hub.example.yaml": yaml_documents(
             hub_manifests(cfg, REFERENCE_HUB, placeholder_values(cfg, REFERENCE_HUB)), hub_header
         ),
@@ -756,6 +965,11 @@ def cmd_init(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     ensure_base(cfg, kube)
     print(f"cluster ready for {cfg.domain}: TLS {cfg.tls_mode}, hub image {cfg.hub_image}, "
           f"backups {'to R2 at ' + cfg.backup_schedule if cfg.r2_configured else 'without R2 (set R2_* in .env)'}")
+    if cfg.gateway_enabled:
+        keys = ", ".join(k for k in GATEWAY_VENDOR_KEYS if cfg.env.get(k))
+        print(f"model gateway: {GATEWAY} at {GATEWAY_URL} holds {keys}; hubs get per-hub tokens")
+    else:
+        print("model gateway: off (LLM_GATEWAY=off or no vendor key in .env); hubs call the vendor directly")
     names = hub_names(kube)
     print(f"hubs: {', '.join(names) or 'none yet'}")
     return 0
@@ -776,9 +990,7 @@ def cmd_create(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     values.setdefault("NODE_HOST", "0.0.0.0")
     values.setdefault("NODE_PORT", "8080")
     values.setdefault("NODE_DATA_DIR", "/data")
-    for key in HUB_ENV_PASSTHROUGH:
-        if key not in values and cfg.env.get(key):
-            values[key] = cfg.env[key]
+    wire_model_access(cfg, kube, name, values)
     kube.apply(hub_manifests(cfg, name, values))
     ready = kube.rollout_status(f"hub-{name}", NS_HUBS)
     print(f"hub {name} is {'up' if ready else 'not ready yet'} at {cfg.public_url(name)}")
@@ -795,6 +1007,12 @@ def cmd_remove(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     for kind in ("ingress", "service", "statefulset", "secret"):
         kube.delete(kind, f"hub-{name}-env" if kind == "secret" else f"hub-{name}", NS_HUBS)
     print(f"hub {name} removed; its volume data-hub-{name}-0 is kept (hubctl remove {name} --purge deletes it)")
+    if gateway_installed(kube):
+        result = gateway_cli(kube, "disable-hub", name, check=False)
+        if result.returncode == 0:
+            print(f"gateway token revoked ({result.stdout.strip()})")
+        else:
+            print(f"warning: could not disable {name} at {GATEWAY}: {(result.stderr or '').strip()}", file=sys.stderr)
     if args.purge:
         kube.delete("pvc", f"data-hub-{name}-0", NS_HUBS)
         print(f"volume of {name} deleted")
@@ -808,18 +1026,22 @@ def cmd_list(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     return 0
 
 
+def pod_state(pod: Optional[dict]) -> str:
+    if pod is None:
+        return "no pod"
+    ready = all(c.get("ready") for c in pod.get("status", {}).get("containerStatuses", []))
+    return f"{pod.get('status', {}).get('phase', '?')}{' ready' if ready else ''}"
+
+
 def cmd_status(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     cfg.require()
+    if gateway_installed(kube):
+        gw_pods = kube.pods(NS_SYSTEM, f"app={GATEWAY}")
+        print(f"{GATEWAY:<24} {GATEWAY_URL:<44} {pod_state(gw_pods[0] if gw_pods else None)}")
     pods = kube.pods(NS_HUBS, "app=hub")
     by_hub = {p["metadata"].get("labels", {}).get("hub", "?"): p for p in pods}
     for name in hub_names(kube):
-        pod = by_hub.get(name)
-        if pod is None:
-            state = "no pod"
-        else:
-            ready = all(c.get("ready") for c in pod.get("status", {}).get("containerStatuses", []))
-            state = f"{pod.get('status', {}).get('phase', '?')}{' ready' if ready else ''}"
-        print(f"{name:<24} {cfg.public_url(name):<44} {state}")
+        print(f"{name:<24} {cfg.public_url(name):<44} {pod_state(by_hub.get(name))}")
     return 0
 
 
@@ -836,6 +1058,48 @@ def cmd_rotate_key(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     print(f"hub {name} restarted with a new key ({'ready' if ready else 'not ready yet'}); sessions and MCP clients must sign in again")
     print(f"owner key (shown once, store it safely): {values['NODE_API_KEY']}")
     return 0 if ready else 1
+
+
+def cmd_gateway_token(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
+    name = validate_name(args.name)
+    cfg.require()
+    values = hub_values(cfg, kube, name)
+    if not values:
+        raise HubctlError(f"hub {name} does not exist")
+    if not cfg.gateway_enabled or not gateway_installed(kube):
+        raise HubctlError(f"no {GATEWAY} to issue tokens: set a vendor key in .env, keep LLM_GATEWAY on, run hubctl init")
+    use_gateway_token(values, issue_gateway_token(kube, name))
+    kube.apply(hub_manifests(cfg, name, values))
+    kube.rollout_restart(f"hub-{name}", NS_HUBS)
+    ready = kube.rollout_status(f"hub-{name}", NS_HUBS)
+    print(f"hub {name} restarted with a new gateway token ({'ready' if ready else 'not ready yet'}); the old token is refused")
+    return 0 if ready else 1
+
+
+def cmd_usage(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
+    cfg.require()
+    if not gateway_installed(kube):
+        raise HubctlError(f"no {GATEWAY} in the cluster; hubctl init deploys it when .env has a vendor key "
+                          "and LLM_GATEWAY is not off")
+    cli = ["usage"]
+    if args.name:
+        cli += ["--hub", validate_name(args.name)]
+    if args.since:
+        cli += ["--from", args.since]
+    if args.until:
+        cli += ["--to", args.until]
+    rows = json.loads(gateway_cli(kube, *cli).stdout or "[]")
+    if not rows:
+        print("no usage recorded")
+        return 0
+    print(f"{'day':<10}  {'hub':<24} {'requests':>8} {'input':>10} {'output':>10} {'cents':>8}")
+    for r in rows:
+        print(f"{r['day']:<10}  {r['hub']:<24} {r['requests']:>8} {r['input_tokens']:>10} "
+              f"{r['output_tokens']:>10} {r['cost_cents']:>8.2f}")
+    total = lambda field: sum(r[field] for r in rows)  # noqa: E731
+    print(f"{'total':<10}  {'':<24} {total('requests'):>8} {total('input_tokens'):>10} "
+          f"{total('output_tokens'):>10} {total('cost_cents'):>8.2f}")
+    return 0
 
 
 def login_url(cfg: Config, name: str, key: str) -> Tuple[str, int]:
@@ -919,11 +1183,18 @@ def cmd_restore(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
 
 def cmd_upgrade(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     cfg.require()
-    targets = hub_names(kube) if args.name in (None, "all") else [validate_name(args.name)]
+    everything = args.name in (None, "all")
+    targets = hub_names(kube) if everything else [validate_name(args.name)]
+    failed = []
+    if everything and gateway_installed(kube):
+        kube.set_image(GATEWAY, NS_SYSTEM, cfg.hub_image, kind="deployment", container="gateway")
+        ready = kube.rollout_status(GATEWAY, NS_SYSTEM, kind="deployment")
+        print(f"{GATEWAY}: {'ready' if ready else 'not ready'} on {cfg.hub_image}")
+        if not ready:
+            failed.append(GATEWAY)
     if not targets:
         print("no hubs to upgrade")
-        return 0
-    failed = []
+        return 1 if failed else 0
     for name in targets:
         kube.set_image(f"hub-{name}", NS_HUBS, cfg.hub_image)
         ready = kube.rollout_status(f"hub-{name}", NS_HUBS)
@@ -944,6 +1215,8 @@ def cmd_render(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     cfg.require()
     if args.name == "all":
         objects = namespaces() + network_policies() + traefik_config(cfg) + backup_manifests(cfg)
+        if cfg.gateway_enabled:
+            objects += gateway_manifests(cfg, cfg.gateway_placeholder_env())
     else:
         name = validate_name(args.name)
         values = hub_values(cfg, kube, name) or placeholder_values(cfg, name)
@@ -964,7 +1237,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"directory holding .env (default: $HUBCTL_ROOT or {DEFAULT_ROOT})")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("init", help="namespaces, network policies, Traefik config, backup CronJob")
+    p = sub.add_parser("init", help="namespaces, network policies, Traefik config, backup CronJob, llm-gateway")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("create", help="create (or repair) a hub and wait for it")
@@ -988,6 +1261,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name")
     p.set_defaults(func=cmd_rotate_key)
 
+    p = sub.add_parser("gateway-token", help="issue a hub a new llm-gateway token and restart it")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_gateway_token)
+
+    p = sub.add_parser("usage", help="model requests and tokens per hub and day, from the llm-gateway")
+    p.add_argument("name", nargs="?", help="only this hub")
+    p.add_argument("--from", dest="since", metavar="YYYY-MM-DD", help="first day (inclusive)")
+    p.add_argument("--to", dest="until", metavar="YYYY-MM-DD", help="last day (inclusive)")
+    p.set_defaults(func=cmd_usage)
+
     p = sub.add_parser("login-link", help="mint a 10-minute magic sign-in link for a hub's owner")
     p.add_argument("name")
     p.set_defaults(func=cmd_login_link)
@@ -1002,7 +1285,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("archive")
     p.set_defaults(func=cmd_restore)
 
-    p = sub.add_parser("upgrade", help="roll hubs to the image in .env, one by one")
+    p = sub.add_parser("upgrade", help="roll the gateway and the hubs to the image in .env, one by one")
     p.add_argument("name", nargs="?", default="all")
     p.set_defaults(func=cmd_upgrade)
 

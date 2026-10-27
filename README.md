@@ -64,10 +64,15 @@ own health through `node-server healthcheck`, a 2-second loopback probe of
 `/api/v1/health` that exits 0 or 1, so no curl is needed inside the image; it also sets
 `TOKIO_WORKER_THREADS=2` so a node does not start one worker per host core. A bind-mounted
 data directory must be writable by uid 65532. On k3s the kubelet probes `/api/v1/health`
-over HTTP itself and the subcommand stays available for `kubectl exec` debugging; the hosting
-design around this image is in [docs/SPEC-hosted-platform.md](docs/SPEC-hosted-platform.md), and
-[deploy/README.md](deploy/README.md) walks through running many hubs on one k3s node behind
-Cloudflare with `hubctl`.
+over HTTP itself and the subcommand stays available for `kubectl exec` debugging. The hosting
+design around this image is in [docs/SPEC-hosted-platform.md](docs/SPEC-hosted-platform.md).
+
+### Deploying hubs for others
+
+`deploy/` runs many hubs on one k3s node behind Cloudflare: `hubctl` (create, backup,
+restore, upgrade hubs), the `llm-gateway` (vendor keys stay there; hubs get per-hub tokens
+and usage is recorded) and a nightly backup job to Cloudflare R2. The step-by-step how-to
+is [deploy/README.md](deploy/README.md).
 
 ### Configuration (`.env`)
 

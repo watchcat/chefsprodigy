@@ -19,7 +19,10 @@ stringData:
   NODE_PORT: "8080"
   NODE_DATA_DIR: /data
   LLM_MODEL: minimax/MiniMax-M3
-  MINIMAX_API_KEY: "<vendor key copied from .env until llm-gateway issues hub tokens (RN-66)>"
+  MINIMAX_ANTHROPIC_API_BASE: "http://llm-gateway.chefs-system.svc:8080/anthropic"
+  MINIMAX_API_KEY: "<hub token issued by llm-gateway at hubctl create>"
+  ANTHROPIC_BASE_URL: "http://llm-gateway.chefs-system.svc:8080/anthropic"
+  ANTHROPIC_API_KEY: "<hub token issued by llm-gateway at hubctl create>"
 ---
 apiVersion: apps/v1
 kind: StatefulSet
