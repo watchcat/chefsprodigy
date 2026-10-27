@@ -47,6 +47,25 @@ cargo run --release -p node-server -- serve --port 8080
 
 Data (SQLite database and WebP covers) lives in `./data` by default (`--data-dir`).
 
+### Docker
+
+Tagged releases are published to GHCR by `.github/workflows/docker.yml`. The image is
+distroless (no shell), runs as a non-root user and keeps everything under `/data`:
+
+```sh
+docker run -d --name chefsprodigy -p 8080:8080 \
+  -v chefs-data:/data --env-file .env \
+  ghcr.io/watchcat/chefsprodigy:latest
+```
+
+`docker build -t chefsprodigy .` builds the same image locally. The container reports its
+own health through `node-server healthcheck`, a 2-second loopback probe of
+`/api/v1/health` that exits 0 or 1, so no curl is needed inside the image; it also sets
+`TOKIO_WORKER_THREADS=2` so a node does not start one worker per host core. A bind-mounted
+data directory must be writable by uid 65532. On k3s the kubelet probes `/api/v1/health`
+over HTTP itself and the subcommand stays available for `kubectl exec` debugging; the hosting
+design around this image is in [docs/SPEC-hosted-platform.md](docs/SPEC-hosted-platform.md).
+
 ### Configuration (`.env`)
 
 | Variable | Purpose |

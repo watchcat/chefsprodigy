@@ -57,6 +57,15 @@ enum Command {
         #[arg(long, env = "NODE_DB_PATH")]
         db: Option<PathBuf>,
     },
+    /// Probe a running node on loopback; exit 0 when healthy, 1 otherwise (container HEALTHCHECK)
+    Healthcheck {
+        /// TCP port the node listens on
+        #[arg(long, default_value_t = 8080, env = "NODE_PORT")]
+        port: u16,
+        /// Address to probe
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+    },
     /// Run the MCP server over stdio for local AI clients
     McpStdio {
         /// Directory for the database and stored images
@@ -114,6 +123,9 @@ async fn main() -> anyhow::Result<()> {
             let report = state.translations().backfill_languages().await?;
             println!("{}", serde_json::to_string(&report)?);
             Ok(())
+        }
+        Command::Healthcheck { port, host } => {
+            node_server::health::check(&host, port, node_server::health::DEFAULT_TIMEOUT).await
         }
         Command::McpStdio { data_dir, db } => {
             tracing_subscriber::fmt()

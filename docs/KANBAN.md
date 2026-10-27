@@ -16,10 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-63 · Dockerfile, `healthcheck` subcommand and image publishing (S)
-Per `docs/SPEC-hosted-platform.md` §5.1: multi-stage build, distroless runtime with no shell tools, non-root, `/data` volume; new `node-server healthcheck [--port]` subcommand that does one loopback GET of `/api/v1/health` (2 s timeout, exit 0/1) and is used by `HEALTHCHECK`, so the image needs no `curl`; `TOKIO_WORKER_THREADS=2` set in the image and repeated in the k3s pod template (§5.6), where the kubelet probes `/api/v1/health` over `httpGet`; GitHub Actions publishing `ghcr.io/watchcat/chefsprodigy` on tags.
-- Acceptance: `docker run` reports healthy with no `curl`/`wget` in the image; `node-server healthcheck` exits 1 when nothing listens; image under 30 MB compressed.
-
 ### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
 `NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
 - Acceptance: API tests: manifest lists a translation with its own `updated_at` after `PUT /recipes/{id}/translations/ru` without the recipe's `updated_at` changing; federated recipe carries it; public recipes only; allowlist derived from the URL.
@@ -109,6 +105,12 @@ _(empty)_
 
 ## Done
 
+### RN-63 · Dockerfile, `healthcheck` subcommand and image publishing (S)
+Per `docs/SPEC-hosted-platform.md` §5.1: multi-stage build, distroless runtime with no shell tools, non-root, `/data` volume; new `node-server healthcheck [--port]` subcommand that does one loopback GET of `/api/v1/health` (2 s timeout, exit 0/1) and is used by `HEALTHCHECK`, so the image needs no `curl`; `TOKIO_WORKER_THREADS=2` set in the image and repeated in the k3s pod template (§5.6), where the kubelet probes `/api/v1/health` over `httpGet`; GitHub Actions publishing `ghcr.io/watchcat/chefsprodigy` on tags.
+- Acceptance: `docker run` reports healthy with no `curl`/`wget` in the image; `node-server healthcheck` exits 1 when nothing listens; image under 30 MB compressed.
+
+- Done 2026-10-27 (re-applied from the rolled-back 9c38a83 onto the k3s baseline, board and docs redone): `Dockerfile` (rust:1.97-slim-bookworm build stage with BuildKit cache mounts → `gcr.io/distroless/cc-debian12:nonroot`, `/data` owned by uid 65532, `TOKIO_WORKER_THREADS=2`, `HEALTHCHECK` through the binary), `.dockerignore` (excludes docs, scripts, deploy/, secrets, `rust-toolchain.toml`), `node-server healthcheck [--port] [--host]` (hand-written loopback GET of `/api/v1/health`, 2 s timeout, exit 0/1; `NODE_PORT` default like `serve`), `.github/workflows/docker.yml` (build + smoke test on pushes and PRs, publish `ghcr.io/watchcat/chefsprodigy` as version/major.minor/latest on `v*` tags). 8 tests in `tests/healthcheck.rs` (188 total), clippy and rustfmt clean. Container check 2026-10-27 (arm64): healthy after 15 s via its own probe, no `/bin/sh`, uid 65532, recipe POST to `/data` 201, probe exit 1 on a dead port and 0 on the live one, `TOKIO_WORKER_THREADS=2` in the image env, 14.4 MB uncompressed / 14.1 MB gzip (limit 30 MB), 2.8 MiB RSS idle. On k3s the kubelet probes `/api/v1/health` over `httpGet` (RN-65 pod template); the subcommand serves `docker run` and `kubectl exec`. First GHCR publish happens on the first `v*` tag.
+
 ### RN-62 · UI: owner login and read-only mode for visitors (S)
 The PWA now checks `GET /api/v1/auth/me` before rendering a route, presents a native owner-key login dialog backed by `POST /api/v1/auth/login`, and offers `POST /api/v1/auth/logout`. Visitors see only public recipes and no create/edit/delete/import/translation-correction controls; direct write routes render an owner-access prompt, real `401` responses open the same login dialog, and the recipe detail explains that uncached display-language translations appear after the owner has viewed the recipe. Owner sessions use the existing HttpOnly cookie and survive reloads.
 - Verified in-browser 2026-10-24 via `scripts/devbuild.sh` against an isolated key-protected node: anonymous view contained only a public Dutch recipe, no write controls, a Russian cached-translation hint, and the protected `#/new` login prompt. After native-dialog sign-in, the session survived a reload, the owner saw the private recipe plus import/edit/delete controls, and logout restored public-only visitor mode.
@@ -172,18 +174,3 @@ The import dialog now includes a responsive From photo tab with a camera-capable
 
 ### RN-45 · MCP: photo_paths on import_recipe (S)
 `import_recipe` accepts `photo_paths`; unreadable paths are reported in the tool error. End-to-end test over stdio with a fake vision extractor.
-
-### RN-44 · Backend: photo import endpoint and vision extraction (M)
-`POST /api/v1/import/photo` live: EXIF-oriented 1600 px JPEG normalization, one vision call (`PhotoExtraction`), lenient parsing, cover from the first dish photo, and 422/503 paths. The first MiniMax-M3 browser run is verified under RN-46.
-
-### RN-41 · UI: cover image upload in the editor (S)
-The editor accepts JPEG, PNG, and WebP images, then posts the selected file as multipart field `file` to `PUT /api/v1/recipes/{id}/image` after a recipe exists. It waits for the returned recipe and routes to its detail page, where the converted cover is rendered.
-- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a JPEG uploaded through the Beef Pho editor and the returned WebP cover rendered on both the recipe detail page and library card.
-
-### RN-35 · UI: manual recipe editor (M)
-The PWA now has `#/new` and `#/recipe/{id}/edit` views with accessible create/edit forms for title, description, servings, times, tags, provenance, visibility, normalized ingredients, specialty flags, and ordered timed steps. Ingredient and step rows are dynamically addable/removable; successful saves use the documented `POST` or `PUT` endpoint and API failures render inline.
-- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: Browser Lemon Orzo was created from the form and opened in detail; the seeded Beef Pho recipe round-tripped all 5 ingredients, 5 specialty controls, 3 ordered instructions, and 3 timer controls through `PUT`; dynamic controls added a sixth ingredient and fourth step without persisting on Cancel. Browser console had no errors.
-
-### RN-43 · Drop the unused legacy vector mark (S)
-Removed the unreferenced 150 KB legacy vector app mark from the embedded bundle. The local PNG icon set remains the sole browser and manifest branding source, and the frontend scope now documents that arrangement.
-- Verified 2026-10-22: the static bundle is 176 KB and a repository-source scan finds no retired asset filename.
