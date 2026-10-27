@@ -40,7 +40,8 @@ Strictly adhere to the following modular Workspace layout:
 │   ├── recipe-scraper/         # Schema.org parser + htmd + rig structured-output extractor + Mealie (.zip) importer
 │   ├── recipe-mcp/             # MCP Tools + shared ImportService (rig agents consume the MCP tools via the rig-rmcp crate)
 │   └── node-server/            # Binary: Axum HTTP/SSE server, CLI (stdio MCP mode), rust-embed static UI
-└── frontend/                   # Lightweight UI (PWA, Cook Mode with WakeLock API)
+├── frontend/                   # Lightweight UI (PWA, Cook Mode with WakeLock API)
+└── deploy/                     # k3s hosting: hubctl (Python, drives kubectl), generated reference manifests in k8s/, how-to
 ```
 
 ---
@@ -55,6 +56,7 @@ Always use these commands to verify your changes:
 - **Run node in local MCP (stdio) mode:** `cargo run -p node-server -- mcp-stdio`
 - **Backfill source languages:** `cargo run -p node-server -- backfill-language` (also runs in the background at `serve` startup)
 - **Container image:** `docker build -t chefsprodigy .` (distroless, non-root, `/data` volume, `TOKIO_WORKER_THREADS=2`). Its `HEALTHCHECK` runs `node-server healthcheck [--port]`, a loopback probe of `/api/v1/health` that exits 0 or 1, so the image needs no curl. Tags `v*` publish `ghcr.io/watchcat/chefsprodigy` through `.github/workflows/docker.yml`.
+- **Hosting tooling (k3s):** `python3 -I -m unittest discover -s deploy/tests` runs `deploy/hubctl` against a fake kubectl and checks that `deploy/k8s/*.yaml` equal `deploy/hubctl render --reference deploy/k8s`; regenerate them after changing hubctl. `deploy/README.md` §6 has the k3d dry run; hub Ingresses carry only the `headers` middleware because Traefik's `buffering` stalls `/mcp` event streams.
 - **Toolchain:** rustc 1.97+ (rig-core 0.45 requires it). Use the Nix dev shell in `../flake.nix` (`nix develop`) or rustup via `rust-toolchain.toml`. Never build with both toolchains in the same `target/` directory: proc-macro libraries are not interchangeable. `scripts/devbuild.sh` uses `target/rustc-<version>-<hash>/` automatically; for plain `cargo` commands set `CARGO_TARGET_DIR` likewise when switching toolchains, or run `cargo clean` first.
 
 ---

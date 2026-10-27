@@ -1,0 +1,21 @@
+name: deploy tooling
+
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/**", ".github/workflows/deploy.yml"]
+  pull_request:
+    paths: ["deploy/**", ".github/workflows/deploy.yml"]
+
+jobs:
+  hubctl:
+    name: hubctl unit tests and reference manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests against the fake kubectl
+        run: python3 -I -m unittest discover -s deploy/tests -v
+      - name: Reference manifests are current
+        run: |
+          python3 -I deploy/hubctl render --reference "$RUNNER_TEMP/k8s"
+          diff -r "$RUNNER_TEMP/k8s" deploy/k8s --exclude README.md

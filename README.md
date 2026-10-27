@@ -65,7 +65,9 @@ own health through `node-server healthcheck`, a 2-second loopback probe of
 `TOKIO_WORKER_THREADS=2` so a node does not start one worker per host core. A bind-mounted
 data directory must be writable by uid 65532. On k3s the kubelet probes `/api/v1/health`
 over HTTP itself and the subcommand stays available for `kubectl exec` debugging; the hosting
-design around this image is in [docs/SPEC-hosted-platform.md](docs/SPEC-hosted-platform.md).
+design around this image is in [docs/SPEC-hosted-platform.md](docs/SPEC-hosted-platform.md), and
+[deploy/README.md](deploy/README.md) walks through running many hubs on one k3s node behind
+Cloudflare with `hubctl`.
 
 ### Configuration (`.env`)
 
