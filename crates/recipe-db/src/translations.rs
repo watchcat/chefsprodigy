@@ -98,21 +98,6 @@ impl Db {
         Ok(r.rows_affected() > 0)
     }
 
-    /// Every stored translation of `recipe_id`, ordered by language.
-    pub async fn list_translations(
-        &self,
-        recipe_id: &str,
-    ) -> Result<Vec<RecipeTranslation>, DbError> {
-        let rows: Vec<TranslationRow> = sqlx::query_as(
-            "SELECT lang, title, description, ingredients, instructions, tags, origin, source_updated_at, created_at, updated_at \
-             FROM recipe_translations WHERE recipe_id = ? ORDER BY lang",
-        )
-        .bind(recipe_id)
-        .fetch_all(self.pool())
-        .await?;
-        rows.into_iter().map(RecipeTranslation::try_from).collect()
-    }
-
     /// Languages a recipe has translations for.
     pub async fn translation_langs(&self, recipe_id: &str) -> Result<Vec<String>, DbError> {
         Ok(sqlx::query_scalar(
@@ -145,9 +130,7 @@ impl Db {
         Ok(rows.into_iter().collect())
     }
 
-    /// Insert or replace labels for `lang`. A model (`llm`) label never replaces
-    /// a human one, so seeded and hand-corrected terms stay put; a human label
-    /// replaces anything.
+    /// Insert or replace labels for `lang`.
     pub async fn upsert_terms(
         &self,
         lang: &str,
@@ -161,8 +144,7 @@ impl Db {
         for (id, label) in labels {
             sqlx::query(
                 "INSERT INTO canonical_terms (canonical_id, lang, label, origin) VALUES (?, ?, ?, ?) \
-                 ON CONFLICT(canonical_id, lang) DO UPDATE SET label = excluded.label, origin = excluded.origin \
-                 WHERE excluded.origin = 'human' OR canonical_terms.origin <> 'human'",
+                 ON CONFLICT(canonical_id, lang) DO UPDATE SET label = excluded.label, origin = excluded.origin",
             )
             .bind(id)
             .bind(lang)

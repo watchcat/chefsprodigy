@@ -39,8 +39,7 @@ Strictly adhere to the following modular Workspace layout:
 │   ├── recipe-db/              # sqlx SQLite pool, repositories, FTS5 search queries
 │   ├── recipe-scraper/         # Schema.org parser + htmd + rig structured-output extractor + Mealie (.zip) importer
 │   ├── recipe-mcp/             # MCP Tools + shared ImportService (rig agents consume the MCP tools via the rig-rmcp crate)
-│   ├── node-server/            # Binary: Axum HTTP/SSE server, CLI (stdio MCP mode), rust-embed static UI
-│   └── llm-gateway/            # Binary: LLM gateway for hosted hubs (vendor key custody, hub tokens, usage; Messages passthrough)
+│   └── node-server/            # Binary: Axum HTTP/SSE server, CLI (stdio MCP mode), rust-embed static UI
 └── frontend/                   # Lightweight UI (PWA, Cook Mode with WakeLock API)
 ```
 
@@ -54,10 +53,7 @@ Always use these commands to verify your changes:
 - **Run tests:** `cargo test --workspace`
 - **Run node as HTTP server:** `cargo run -p node-server -- serve --port 8080`
 - **Run node in local MCP (stdio) mode:** `cargo run -p node-server -- mcp-stdio`
-- **Run the LLM gateway:** `cargo run -p llm-gateway -- serve --port 8090` (vendor keys and `GATEWAY_ADMIN_TOKEN` from the environment; `llm-gateway add-hub <name>` prints a hub token). A hub uses it by setting `MINIMAX_ANTHROPIC_API_BASE=http://<gateway>/anthropic` and `MINIMAX_API_KEY=<hub token>`.
 - **Backfill source languages:** `cargo run -p node-server -- backfill-language` (also runs in the background at `serve` startup)
-- **Container image:** `docker build -t chefsprodigy .` (distroless, non-root, `/data` volume, `TOKIO_WORKER_THREADS=2`). Its `HEALTHCHECK` runs `node-server healthcheck [--port]`, a loopback probe of `/api/v1/health` that exits 0 or 1, so the image needs no curl. Tags `v*` publish `ghcr.io/watchcat/chefsprodigy` through `.github/workflows/docker.yml`.
-- **Deployment tooling:** `deploy/` holds the one-VPS stack (Compose, Caddy, `hubctl`, backup job; how-to in `deploy/README.md`). Its tests: `python3 -I -m unittest discover -s deploy/tests` (no Docker needed).
 - **Toolchain:** rustc 1.97+ (rig-core 0.45 requires it). Use the Nix dev shell in `../flake.nix` (`nix develop`) or rustup via `rust-toolchain.toml`. Never build with both toolchains in the same `target/` directory: proc-macro libraries are not interchangeable. `scripts/devbuild.sh` uses `target/rustc-<version>-<hash>/` automatically; for plain `cargo` commands set `CARGO_TARGET_DIR` likewise when switching toolchains, or run `cargo clean` first.
 
 ---
@@ -72,4 +68,3 @@ Always use these commands to verify your changes:
    - `PRAGMA foreign_keys = ON;`
    - `PRAGMA busy_timeout = 5000;`
 5. **Deterministic `content_hash`:** On every recipe creation or update, recompute `content_hash` (SHA-256 of sorted lowercase `canonical_id`s + quantities + normalized instruction text) so the future Central Aggregator can track forks and duplicates accurately.
-6. **SSRF guard on user-supplied URLs:** Every fetch of a URL that came from a user (page, cover, JSON-LD image) goes through `RecipeImporter`, whose client is built with `recipe_scraper::ssrf` (`UrlGuard`, `GuardedResolver`, `redirect_policy`). Never create a separate `reqwest::Client` for user-supplied URLs, and keep `allow_private_hosts()` out of production code paths.

@@ -159,10 +159,7 @@ async fn tools_honour_the_language_argument() {
     .await;
     assert_eq!(d["title"], "[ru] Pho");
     assert_eq!(d["ingredients"][0]["raw_text"], "[ru] 1 kg botten");
-    assert_eq!(
-        d["ingredients"][0]["canonical_label"], "говяжьи кости",
-        "seeded dictionary label (RN-75)"
-    );
+    assert_eq!(d["ingredients"][0]["canonical_label"], "ru:beef_bones");
     assert_eq!(d["translation"]["lang"], "ru");
 
     let s = call(
@@ -182,8 +179,8 @@ async fn tools_honour_the_language_argument() {
         json!({"items": [{"recipe_id": r.id, "servings": 2}], "language": "ru"}),
     )
     .await;
-    assert_eq!(l["basic_groceries"][0]["canonical_label"], "говяжьи кости");
-    assert_eq!(l["specialty_items"][0]["canonical_label"], "бадьян");
+    assert_eq!(l["basic_groceries"][0]["canonical_label"], "ru:beef_bones");
+    assert_eq!(l["specialty_items"][0]["canonical_label"], "ru:star_anise");
 
     let plain = call(&client, "get_recipe_details", json!({"recipe_id": r.id})).await;
     assert_eq!(plain["title"], "Pho");

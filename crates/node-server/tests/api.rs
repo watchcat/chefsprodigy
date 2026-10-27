@@ -15,11 +15,6 @@ use tower::ServiceExt;
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 async fn app() -> Router {
-    app_with(|state| state).await
-}
-
-/// An app whose state is adjusted by `configure` before the router is built.
-async fn app_with(configure: impl FnOnce(AppState) -> AppState) -> Router {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir: PathBuf =
         std::env::temp_dir().join(format!("node-api-test-{}-{n}", std::process::id()));
@@ -32,7 +27,7 @@ async fn app_with(configure: impl FnOnce(AppState) -> AppState) -> Router {
             chef_name: "Test Chef".to_string(),
         },
     );
-    build_router(configure(state))
+    build_router(state)
 }
 
 async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -304,13 +299,7 @@ async fn federation_recipe_endpoint_hides_private_recipes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let mut body = body;
-    assert_eq!(body["translations"], json!([]));
-    body.as_object_mut().unwrap().remove("translations");
-    assert_eq!(
-        body, public,
-        "the recipe fields stay flat on the federated object"
-    );
+    assert_eq!(body, public);
 
     let (status, _) = send(
         &app,
@@ -407,160 +396,4 @@ async fn shopping_list_endpoint_aggregates_and_validates() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
     assert!(err["error"].as_str().unwrap().contains("at least one"));
-}
-
-#[tokio::test]
-async fn federation_manifest_exposes_node_url_when_configured() {
-    let app = app().await;
-    let (_, body) = send(&app, "GET", "/api/v1/federation/manifest", None).await;
-    assert_eq!(body["node_url"], Value::Null);
-
-    let app = app_with(|state| state.with_public_url("https://jacob.example.com/")).await;
-    let (status, body) = send(&app, "GET", "/api/v1/federation/manifest", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["node_url"], "https://jacob.example.com");
-}
-
-#[tokio::test]
-async fn federation_manifest_lists_translations_with_their_own_updated_at() {
-    let app = app().await;
-    let (_, recipe) = send(
-        &app,
-        "POST",
-        "/api/v1/recipes",
-        Some(recipe_json("Public", true)),
-    )
-    .await;
-    let id = recipe["id"].as_str().unwrap().to_string();
-    let (_, before) = send(&app, "GET", "/api/v1/federation/manifest", None).await;
-    assert_eq!(before["recipes"][0]["translations"], json!([]));
-
-    let (status, translated) = send(
-        &app,
-        "PUT",
-        &format!("/api/v1/recipes/{id}/translations/ru"),
-        Some(json!({
-            "title": "Лапша",
-            "ingredients": ["200 г лапши", "соль"],
-            "instructions": ["Варить."],
-            "tags": ["быстро"]
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{translated}");
-
-    let (_, after) = send(&app, "GET", "/api/v1/federation/manifest", None).await;
-    let entry = &after["recipes"][0];
-    assert_eq!(
-        entry["updated_at"], recipe["updated_at"],
-        "saving a translation leaves the recipe's updated_at alone"
-    );
-    assert_eq!(entry["content_hash"], recipe["content_hash"]);
-    assert_eq!(
-        entry["translations"],
-        json!([{
-            "lang": "ru",
-            "origin": "human",
-            "stale": false,
-            "updated_at": translated["translation"]["translated_at"]
-        }])
-    );
-
-    // Editing the source moves the recipe's timestamp and marks the translation stale,
-    // while the translation keeps its own timestamp.
-    send(
-        &app,
-        "PUT",
-        &format!("/api/v1/recipes/{id}"),
-        Some(recipe_json("Public v2", true)),
-    )
-    .await;
-    let (_, edited) = send(&app, "GET", "/api/v1/federation/manifest", None).await;
-    let entry = &edited["recipes"][0];
-    assert_ne!(entry["updated_at"], recipe["updated_at"]);
-    assert_eq!(entry["translations"][0]["stale"], true);
-    assert_eq!(
-        entry["translations"][0]["updated_at"],
-        translated["translation"]["translated_at"]
-    );
-}
-
-#[tokio::test]
-async fn federation_recipe_carries_every_stored_translation() {
-    let app = app().await;
-    let (_, recipe) = send(
-        &app,
-        "POST",
-        "/api/v1/recipes",
-        Some(recipe_json("Public", true)),
-    )
-    .await;
-    let id = recipe["id"].as_str().unwrap().to_string();
-    for (lang, title) in [("ru", "Лапша"), ("nl", "Noedels")] {
-        let (status, body) = send(
-            &app,
-            "PUT",
-            &format!("/api/v1/recipes/{id}/translations/{lang}"),
-            Some(json!({"title": title})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-    }
-
-    let (status, body) = send(
-        &app,
-        "GET",
-        &format!("/api/v1/federation/recipes/{id}"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["id"], recipe["id"]);
-    assert_eq!(
-        body["title"], "Public",
-        "the recipe itself stays in its source language"
-    );
-    let translations = body["translations"].as_array().unwrap();
-    let langs: Vec<&str> = translations
-        .iter()
-        .map(|t| t["lang"].as_str().unwrap())
-        .collect();
-    assert_eq!(langs, vec!["nl", "ru"]);
-    assert_eq!(translations[1]["title"], "Лапша");
-    assert_eq!(translations[1]["origin"], "human");
-    assert_eq!(translations[1]["source_updated_at"], recipe["updated_at"]);
-    assert!(translations[1]["updated_at"].is_string());
-    assert!(translations[1]["created_at"].is_string());
-}
-
-#[tokio::test]
-async fn federation_never_exposes_translations_of_private_recipes() {
-    let app = app().await;
-    let (_, private) = send(
-        &app,
-        "POST",
-        "/api/v1/recipes",
-        Some(recipe_json("Private", false)),
-    )
-    .await;
-    let id = private["id"].as_str().unwrap();
-    let (status, _) = send(
-        &app,
-        "PUT",
-        &format!("/api/v1/recipes/{id}/translations/ru"),
-        Some(json!({"title": "Секрет"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let (_, manifest) = send(&app, "GET", "/api/v1/federation/manifest", None).await;
-    assert_eq!(manifest["recipes"], json!([]));
-    let (status, _) = send(
-        &app,
-        "GET",
-        &format!("/api/v1/federation/recipes/{id}"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
 }

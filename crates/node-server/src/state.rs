@@ -30,14 +30,12 @@ struct Inner {
     images: ImageStore,
     mcp_api_key: Option<String>,
     mcp_allowed_hosts: Vec<String>,
-    public_url: Option<String>,
 }
 
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
             .field("node", &self.inner.node)
-            .field("public_url", &self.inner.public_url)
             .field("images", &self.inner.images)
             .field("mcp_enabled", &self.inner.mcp_api_key.is_some())
             .finish()
@@ -47,32 +45,6 @@ impl std::fmt::Debug for AppState {
 /// Hosts accepted on `/mcp` unless overridden (DNS-rebinding protection).
 pub fn default_mcp_allowed_hosts() -> Vec<String> {
     ["localhost", "127.0.0.1", "::1"].map(String::from).to_vec()
-}
-
-/// The default `/mcp` allowlist plus the host of the node's public URL, so a
-/// node behind a reverse proxy accepts its own public name without extra
-/// configuration. An unparsable or non-http(s) URL adds nothing.
-pub fn default_mcp_allowed_hosts_with(public_url: Option<&str>) -> Vec<String> {
-    let mut hosts = default_mcp_allowed_hosts();
-    if let Some(authority) = public_url.and_then(public_authority)
-        && !hosts.contains(&authority)
-    {
-        hosts.push(authority);
-    }
-    hosts
-}
-
-/// `host` or `host:port` of an absolute http(s) URL, as a `Host` header carries it.
-fn public_authority(url: &str) -> Option<String> {
-    let url = url::Url::parse(url.trim()).ok()?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return None;
-    }
-    let host = url.host_str()?;
-    Some(match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    })
 }
 
 impl AppState {
@@ -87,7 +59,6 @@ impl AppState {
                 images: ImageStore::new(PathBuf::from("data/images")),
                 mcp_api_key: None,
                 mcp_allowed_hosts: default_mcp_allowed_hosts(),
-                public_url: None,
             }),
         }
     }
@@ -119,13 +90,6 @@ impl AppState {
         self.edit(|i| i.mcp_allowed_hosts = hosts)
     }
 
-    /// Public base URL of this node (`NODE_PUBLIC_URL`), exposed as `node_url` in
-    /// the federation manifest. Trailing slashes are dropped; blank means unset.
-    pub fn with_public_url(self, url: impl Into<String>) -> Self {
-        let url = url.into().trim().trim_end_matches('/').to_string();
-        self.edit(|i| i.public_url = Some(url).filter(|u| !u.is_empty()))
-    }
-
     pub fn db(&self) -> &Db {
         &self.inner.db
     }
@@ -148,10 +112,6 @@ impl AppState {
 
     pub fn mcp_allowed_hosts(&self) -> &[String] {
         &self.inner.mcp_allowed_hosts
-    }
-
-    pub fn public_url(&self) -> Option<&str> {
-        self.inner.public_url.as_deref()
     }
 
     /// Import pipeline bound to this node's database and image store.

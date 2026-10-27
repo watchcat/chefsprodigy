@@ -13,7 +13,6 @@ use crate::llm::{
     ExtractedRecipeDraft, PhotoExtraction, RecipeExtractor, TranslationReply, TranslationRequest,
 };
 use crate::sanitize::html_to_markdown;
-use crate::ssrf::{self, UrlGuard};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \
 Chrome/124.0 Safari/537.36 RecipeNode/0.1";
@@ -29,40 +28,24 @@ pub struct ImportResult {
     pub image_url: Option<String>,
 }
 
-/// Recipe import service. Every URL it fetches passes the SSRF guard
-/// ([`crate::ssrf`]): public http(s) destinations only, re-checked on each
-/// redirect hop.
+/// Recipe import service.
 #[derive(Clone)]
 pub struct RecipeImporter {
     http: reqwest::Client,
-    guard: UrlGuard,
     extractor: Arc<dyn RecipeExtractor>,
 }
 
 impl RecipeImporter {
     pub fn new(extractor: Arc<dyn RecipeExtractor>) -> Self {
-        let guard = UrlGuard::new();
-        Self {
-            http: build_client(guard),
-            guard,
-            extractor,
-        }
+        let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_default();
+        Self { http, extractor }
     }
 
-    /// Accept loopback and private-network destinations as well. Meant for
-    /// tests that run a stand-in site locally; link-local (cloud metadata),
-    /// multicast and unspecified addresses stay refused. Call it before
-    /// [`with_http_client`](Self::with_http_client), which replaces the client.
-    pub fn allow_private_hosts(mut self) -> Self {
-        self.guard = UrlGuard::allowing_private_hosts();
-        self.http = build_client(self.guard);
-        self
-    }
-
-    /// Use a custom HTTP client (proxies, test servers). URLs are still checked
-    /// before each request, but the client must bring its own redirect policy
-    /// and DNS guard: see [`crate::ssrf::redirect_policy`] and
-    /// [`crate::ssrf::GuardedResolver`].
+    /// Use a custom HTTP client (proxies, test servers).
     pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
         self.http = http;
         self
@@ -70,16 +53,15 @@ impl RecipeImporter {
 
     /// Fetch `url` and import it.
     pub async fn import_url(&self, url: &str) -> Result<ImportResult, ScraperError> {
-        let target = self.guard.check(url).await?;
-        let response = self
+        let html = self
             .http
-            .get(target.clone())
+            .get(url)
             .send()
-            .await
-            .map_err(|e| ssrf::fetch_error(url, e))?;
-        ssrf::check_response(url, &response)?;
-        let html = response.error_for_status()?.text().await?;
-        self.import_html(&html, Some(target.as_str())).await
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        self.import_html(&html, Some(url)).await
     }
 
     /// Import already-fetched HTML: JSON-LD first, Markdown + LLM otherwise.
@@ -155,17 +137,17 @@ impl RecipeImporter {
         self.extractor.translate_terms(ids, lang).await
     }
 
-    /// Download bytes (used for cover images); guarded like `import_url`.
+    /// Download bytes (used for cover images).
     pub async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ScraperError> {
-        let target = self.guard.check(url).await?;
-        let response = self
+        Ok(self
             .http
-            .get(target)
+            .get(url)
             .send()
-            .await
-            .map_err(|e| ssrf::fetch_error(url, e))?;
-        ssrf::check_response(url, &response)?;
-        Ok(response.error_for_status()?.bytes().await?.to_vec())
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?
+            .to_vec())
     }
 
     async fn import_schema_org(
@@ -217,27 +199,6 @@ impl RecipeImporter {
             image_url: None,
         })
     }
-}
-
-/// HTTP client whose DNS resolver and redirect policy enforce `guard`. Should
-/// the client fail to build, fall back to one that follows no redirects at all,
-/// so no hop can escape the pre-flight check.
-fn build_client(guard: UrlGuard) -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(20))
-        .redirect(ssrf::redirect_policy(guard))
-        .dns_resolver(ssrf::GuardedResolver::new(guard))
-        .build()
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "guarded HTTP client failed to build; redirects disabled");
-            reqwest::Client::builder()
-                .user_agent(USER_AGENT)
-                .timeout(Duration::from_secs(20))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default()
-        })
 }
 
 /// Turn a model draft into a recipe payload: default servings, renumbered steps,

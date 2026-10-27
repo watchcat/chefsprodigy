@@ -716,10 +716,9 @@ mod i18n_search {
 
     #[tokio::test]
     async fn canonical_terms_round_trip() {
-        // Ids outside the seeded dictionary (RN-75), so the table starts empty for them.
         let db = fresh_db().await;
         assert!(
-            db.get_terms(&["gochujang".into()], "ru")
+            db.get_terms(&["garlic".into()], "ru")
                 .await
                 .unwrap()
                 .is_empty()
@@ -727,125 +726,29 @@ mod i18n_search {
         db.upsert_terms(
             "ru",
             &[
-                ("gochujang".into(), "кочхуджан".into()),
-                ("doenjang".into(), "твенджан".into()),
+                ("garlic".into(), "чеснок".into()),
+                ("salt".into(), "соль".into()),
             ],
             TranslationOrigin::Llm,
         )
         .await
         .unwrap();
         let m = db
-            .get_terms(
-                &["gochujang".into(), "doenjang".into(), "furikake".into()],
-                "ru",
-            )
+            .get_terms(&["garlic".into(), "salt".into(), "egg".into()], "ru")
             .await
             .unwrap();
-        assert_eq!(m.get("gochujang").map(String::as_str), Some("кочхуджан"));
+        assert_eq!(m.get("garlic").map(String::as_str), Some("чеснок"));
         assert_eq!(m.len(), 2);
         db.upsert_terms(
             "ru",
-            &[("gochujang".into(), "кочудян".into())],
+            &[("garlic".into(), "чесночок".into())],
             TranslationOrigin::Human,
         )
         .await
         .unwrap();
         assert_eq!(
-            db.get_terms(&["gochujang".into()], "ru").await.unwrap()["gochujang"],
-            "кочудян"
-        );
-    }
-}
-
-mod seeded_terms {
-    use super::*;
-    use recipe_core::TranslationOrigin;
-
-    #[tokio::test]
-    async fn everyday_ingredients_are_labelled_in_three_languages_on_a_fresh_database() {
-        let db = fresh_db().await;
-        let ids: Vec<String> = ["salt", "garlic", "onion", "olive_oil", "egg", "butter"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let expected = [
-            ("en", "salt", "salt"),
-            ("ru", "salt", "соль"),
-            ("nl", "salt", "zout"),
-            ("ru", "garlic", "чеснок"),
-            ("nl", "onion", "ui"),
-            ("ru", "olive_oil", "оливковое масло"),
-            ("nl", "butter", "boter"),
-            ("en", "egg", "egg"),
-        ];
-        for (lang, id, label) in expected {
-            let terms = db.get_terms(&ids, lang).await.unwrap();
-            assert_eq!(terms.len(), ids.len(), "{lang}: every id seeded: {terms:?}");
-            assert_eq!(terms[id], label, "{lang}/{id}");
-        }
-        let origin: String = sqlx::query_scalar(
-            "SELECT origin FROM canonical_terms WHERE canonical_id = 'salt' AND lang = 'ru'",
-        )
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(origin, "human", "seeded rows count as human-made");
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_terms")
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        assert!(
-            total >= 600,
-            "about 200 ids in three languages, got {total}"
-        );
-    }
-
-    #[tokio::test]
-    async fn model_labels_never_overwrite_human_rows_but_humans_can() {
-        let db = fresh_db().await;
-        db.upsert_terms(
-            "ru",
-            &[("salt".into(), "модельная соль".into())],
-            TranslationOrigin::Llm,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            db.get_terms(&["salt".into()], "ru").await.unwrap()["salt"],
-            "соль",
-            "an llm upsert leaves the seeded human label alone"
-        );
-
-        db.upsert_terms(
-            "ru",
-            &[("gochujang".into(), "кочхуджан (модель)".into())],
-            TranslationOrigin::Llm,
-        )
-        .await
-        .unwrap();
-        db.upsert_terms(
-            "ru",
-            &[("gochujang".into(), "кочхуджан".into())],
-            TranslationOrigin::Human,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            db.get_terms(&["gochujang".into()], "ru").await.unwrap()["gochujang"],
-            "кочхуджан",
-            "a human upsert replaces an llm label"
-        );
-        db.upsert_terms(
-            "ru",
-            &[("gochujang".into(), "снова модель".into())],
-            TranslationOrigin::Llm,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            db.get_terms(&["gochujang".into()], "ru").await.unwrap()["gochujang"],
-            "кочхуджан",
-            "and the human label then stays"
+            db.get_terms(&["garlic".into()], "ru").await.unwrap()["garlic"],
+            "чесночок"
         );
     }
 }
@@ -879,123 +782,5 @@ mod backfill {
         assert_eq!(again.content_hash, a.content_hash);
         assert!(db.recipes_without_language(10).await.unwrap().is_empty());
         let _ = b;
-    }
-}
-
-mod federation {
-    use super::*;
-    use recipe_core::{RecipeTranslation, TranslationOrigin};
-
-    fn translation(
-        lang: &str,
-        origin: TranslationOrigin,
-        source_updated_at: &str,
-        updated_at: &str,
-    ) -> RecipeTranslation {
-        RecipeTranslation {
-            lang: lang.into(),
-            title: format!("title-{lang}"),
-            description: None,
-            ingredients: vec![],
-            instructions: vec![],
-            tags: vec![],
-            origin,
-            source_updated_at: source_updated_at.into(),
-            created_at: "c".into(),
-            updated_at: updated_at.into(),
-        }
-    }
-
-    #[tokio::test]
-    async fn public_manifest_lists_translations_with_their_own_timestamps_and_stale_flag() {
-        let db = fresh_db().await;
-        let mut p = pho();
-        p.is_public = true;
-        let public = db.create_recipe(p).await.unwrap();
-        let private = db.create_recipe(omelette()).await.unwrap();
-
-        db.upsert_translation(
-            &public.id,
-            &translation(
-                "ru",
-                TranslationOrigin::Human,
-                &public.updated_at,
-                "2026-10-26T10:00:00Z",
-            ),
-        )
-        .await
-        .unwrap();
-        db.upsert_translation(
-            &public.id,
-            &translation(
-                "nl",
-                TranslationOrigin::Llm,
-                "2000-01-01T00:00:00Z",
-                "2026-10-26T11:00:00Z",
-            ),
-        )
-        .await
-        .unwrap();
-        db.upsert_translation(
-            &private.id,
-            &translation(
-                "ru",
-                TranslationOrigin::Llm,
-                &private.updated_at,
-                "2026-10-26T12:00:00Z",
-            ),
-        )
-        .await
-        .unwrap();
-
-        let manifest = db.public_manifest().await.unwrap();
-        assert_eq!(
-            manifest.len(),
-            1,
-            "private recipes and their translations stay out"
-        );
-        let entry = &manifest[0];
-        assert_eq!(
-            entry.updated_at, public.updated_at,
-            "a translation never moves the recipe's updated_at"
-        );
-        let langs: Vec<&str> = entry.translations.iter().map(|t| t.lang.as_str()).collect();
-        assert_eq!(langs, vec!["nl", "ru"]);
-        let nl = &entry.translations[0];
-        assert_eq!(
-            (nl.origin, nl.stale, nl.updated_at.as_str()),
-            (TranslationOrigin::Llm, true, "2026-10-26T11:00:00Z")
-        );
-        let ru = &entry.translations[1];
-        assert_eq!(
-            (ru.origin, ru.stale, ru.updated_at.as_str()),
-            (TranslationOrigin::Human, false, "2026-10-26T10:00:00Z")
-        );
-    }
-
-    #[tokio::test]
-    async fn list_translations_returns_every_language_in_order() {
-        let db = fresh_db().await;
-        let r = db.create_recipe(pho()).await.unwrap();
-        assert!(db.list_translations(&r.id).await.unwrap().is_empty());
-
-        db.upsert_translation(
-            &r.id,
-            &translation("ru", TranslationOrigin::Human, &r.updated_at, "u1"),
-        )
-        .await
-        .unwrap();
-        db.upsert_translation(
-            &r.id,
-            &translation("de", TranslationOrigin::Llm, &r.updated_at, "u2"),
-        )
-        .await
-        .unwrap();
-
-        let all = db.list_translations(&r.id).await.unwrap();
-        let langs: Vec<&str> = all.iter().map(|t| t.lang.as_str()).collect();
-        assert_eq!(langs, vec!["de", "ru"]);
-        assert_eq!(all[1].title, "title-ru");
-        assert_eq!(all[1].origin, TranslationOrigin::Human);
     }
 }

@@ -88,29 +88,9 @@ async fn app_with(extractor: Arc<dyn RecipeExtractor>) -> (Router, PathBuf) {
             chef_name: "T".into(),
         },
     )
-    // The stand-in site runs on loopback, which the SSRF guard refuses by default.
-    .with_importer(RecipeImporter::new(extractor).allow_private_hosts())
+    .with_importer(RecipeImporter::new(extractor))
     .with_image_dir(dir.join("images"));
     (build_router(state), dir)
-}
-
-/// An app with the default, fully guarded importer.
-async fn guarded_app() -> Router {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir: PathBuf =
-        std::env::temp_dir().join(format!("node-import-guarded-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let db = Db::open(dir.join("recipes.db")).await.unwrap();
-    build_router(
-        AppState::new(
-            db,
-            NodeInfo {
-                author_did: None,
-                chef_name: "T".into(),
-            },
-        )
-        .with_image_dir(dir.join("images")),
-    )
 }
 
 async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -218,49 +198,6 @@ async fn import_text_without_llm_returns_503_json() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert!(body["error"].as_str().unwrap().contains("LLM_MODEL"));
-}
-
-/// Stands in for a model endpoint (gateway or vendor) that refused for quota reasons.
-struct QuotaExhausted;
-
-impl RecipeExtractor for QuotaExhausted {
-    fn normalize_ingredients<'a>(
-        &'a self,
-        _raw: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<IngredientItem>, ScraperError>> + Send + 'a>> {
-        Box::pin(async { Ok(vec![]) })
-    }
-
-    fn extract_recipe<'a>(
-        &'a self,
-        _markdown: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<ExtractedRecipeDraft, ScraperError>> + Send + 'a>> {
-        Box::pin(async {
-            Err(ScraperError::ModelQuotaExceeded(
-                "the model quota for this node is used up (daily quota of 10 requests used)".into(),
-            ))
-        })
-    }
-}
-
-#[tokio::test]
-async fn import_text_reports_model_quota_exhaustion_as_429_with_a_code() {
-    let (app, _) = app_with(Arc::new(QuotaExhausted)).await;
-    let (status, body) = send(
-        &app,
-        "POST",
-        "/api/v1/import/text",
-        Some(json!({"text": "Fry two eggs"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert_eq!(body["code"], "model_quota_exceeded");
-    let message = body["error"].as_str().unwrap();
-    assert!(message.contains("quota"), "{message}");
-    assert!(
-        message.contains("daily quota of 10 requests used"),
-        "{message}"
-    );
 }
 
 #[tokio::test]
@@ -380,33 +317,6 @@ async fn import_url_failures_map_to_clean_errors() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn import_url_refuses_private_and_metadata_addresses() {
-    let app = guarded_app().await;
-    let base = fake_site().await;
-    for url in [
-        "http://169.254.169.254/latest/meta-data/",
-        "http://127.0.0.1:9/",
-        "http://localhost:9/",
-        "http://10.0.0.1/recipe",
-        format!("{base}/pho").as_str(),
-    ] {
-        let (status, body) = send(
-            &app,
-            "POST",
-            "/api/v1/import/url",
-            Some(json!({"url": url})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{url}: {body}");
-        let msg = body["error"].as_str().unwrap_or_default();
-        assert!(
-            msg.contains("refusing to fetch"),
-            "{url}: error should explain the refusal, got {msg:?}"
-        );
-    }
 }
 
 fn mealie_zip() -> Vec<u8> {

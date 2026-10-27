@@ -6,8 +6,6 @@ use thiserror::Error;
 pub enum ScraperError {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("refusing to fetch {url}: {reason}")]
-    BlockedUrl { url: String, reason: String },
     #[error("input is empty")]
     EmptyInput,
     #[error(
@@ -16,10 +14,6 @@ pub enum ScraperError {
     LlmUnavailable,
     #[error("llm error: {0}")]
     Llm(String),
-    /// The model endpoint refused for usage reasons: gateway quota (429), vendor rate
-    /// limit (429) or billing (402). The API answers 429 `model_quota_exceeded`.
-    #[error("model quota exceeded: {0}")]
-    ModelQuotaExceeded(String),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("zip error: {0}")]

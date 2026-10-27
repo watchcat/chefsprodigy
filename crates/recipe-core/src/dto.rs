@@ -388,29 +388,4 @@ pub struct ManifestEntry {
     pub updated_at: String,
     /// Deterministic content hash
     pub content_hash: String,
-    /// Stored translations with their own timestamps: saving one never changes
-    /// `updated_at` or `content_hash`, so an aggregator needs this list to notice it
-    #[serde(default)]
-    pub translations: Vec<ManifestTranslation>,
-}
-
-/// One translation as listed in a manifest entry.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ManifestTranslation {
-    pub lang: String,
-    pub origin: TranslationOrigin,
-    /// The source recipe changed after this translation was made
-    pub stale: bool,
-    /// RFC 3339 timestamp of the translation itself
-    pub updated_at: String,
-}
-
-/// A public recipe as served to the Central Aggregator: the recipe in its
-/// source language (flattened) plus every stored translation, LLM or human.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct FederatedRecipe {
-    #[serde(flatten)]
-    pub recipe: Recipe,
-    #[serde(default)]
-    pub translations: Vec<RecipeTranslation>,
 }

@@ -16,8 +16,40 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
+### RN-63 · Dockerfile, `healthcheck` subcommand and image publishing (S)
+Per `docs/SPEC-hosted-platform.md` §5.1: multi-stage build, distroless runtime with no shell tools, non-root, `/data` volume; new `node-server healthcheck [--port]` subcommand that does one loopback GET of `/api/v1/health` (2 s timeout, exit 0/1) and is used by `HEALTHCHECK`, so the image needs no `curl`; `TOKIO_WORKER_THREADS=2` set in the image and repeated in the k3s pod template (§5.6), where the kubelet probes `/api/v1/health` over `httpGet`; GitHub Actions publishing `ghcr.io/watchcat/chefsprodigy` on tags.
+- Acceptance: `docker run` reports healthy with no `curl`/`wget` in the image; `node-server healthcheck` exits 1 when nothing listens; image under 30 MB compressed.
+
+### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
+`NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
+- Acceptance: API tests: manifest lists a translation with its own `updated_at` after `PUT /recipes/{id}/translations/ru` without the recipe's `updated_at` changing; federated recipe carries it; public recipes only; allowlist derived from the URL.
+
+### RN-74 · SSRF guard on user-supplied URL fetches (S)
+Harden `recipe-scraper` (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images, used by `ImportService::import_url`): resolve the hostname first and refuse loopback, link-local incl. cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918, CGNAT `100.64/10`, `fc00::/7`, multicast/unspecified addresses and any scheme other than `http`/`https`; re-check every redirect hop and connect to the checked address. A builder flag `allow_private_hosts` exists only for tests with local servers. Spec: `docs/SPEC-hosted-platform.md` §6.
+- Acceptance: tests show `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a public URL redirecting to a private address are refused with a clear error; public URLs still import; the model client is unaffected.
+
+### RN-65 · deploy/k8s: namespaces, policies, Traefik config, hub template, hubctl, backup CronJob (M)
+k3s + Traefik + `kubectl` per `docs/SPEC-hosted-platform.md` §3, §4.7, §5.5, §5.6: `deploy/k8s/` with the `chefs-system` and `chefs-hubs` namespaces, default-deny `NetworkPolicy` in `chefs-hubs` (ingress from Traefik and the platform only; egress to DNS, public addresses and `llm-gateway`), the Traefik `HelmChartConfig` (Cloudflare trusted IPs, Origin CA default `TLSStore`, `buffering` and `headers` middlewares, access logs off), the per-hub template (`StatefulSet` + `Secret` + `Service` + `Ingress` + PVC, non-root, read-only, probes on `/api/v1/health`), the nightly backup `CronJob` to R2 via rclone, and `hubctl` (Python, standard library, drives `kubectl`: init, create, remove, list, status, rotate-key, login-link, backup, restore, upgrade) plus a how-to for a fresh k3s node behind Cloudflare.
+- Acceptance: `hubctl create demo` brings up a routed hub on a fresh k3s node; the backup `CronJob` lands an archive in R2; MCP streams through Cloudflare and Traefik; a hub pod cannot reach the platform, the provisioner or another hub.
+
+### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
+New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
+- Acceptance: a hub works unchanged with `MINIMAX_ANTHROPIC_API_BASE` pointed at the gateway; usage recorded per hub.
+
+### RN-67 · Hub: model quota-exceeded mapping (S)
+Gateway 429/402 surfaces as a readable `model_quota_exceeded` error (HTTP 429) instead of a generic model failure.
+- Acceptance: API test with a fake extractor returning the gateway's error.
+
+### RN-68 · llm-gateway v2: quotas, cache, admin API (M)
+Daily/monthly quotas, deterministic-reply cache, admin endpoints and BYOK per spec §5.2.
+- Acceptance: over-quota request gets 429 before any upstream call; a repeated label request is a cache hit; admin API tested.
+
+### RN-75 · Seeded `canonical_terms` dictionary (S)
+SQLite migration inserting `en`, `ru`, `nl` labels for the ~200 most common everyday ingredients (`salt`, `garlic`, `onion`, `butter`, `egg`, `olive_oil`, …) with `origin = 'human'` via `INSERT OR IGNORE`, so hubs never spend model tokens on basic terms and the gateway cache is not relied on for them (spec §4.3).
+- Acceptance: a fresh node labels `salt`/`garlic`/`onion` in all three languages with no model call (fake extractor records zero `translate_terms` calls); rows that already exist are untouched.
+
 ### RN-69 · platform v1: registry, poller, index, search API (M)
-New crate per spec §5.3 without mail and signup: hub registry, federation poller with backoff comparing `(updated_at, content_hash)` and each translation's `(lang, updated_at)`, `recipes_index` + `translations_index`, FTS with one row per `(hub, recipe, lang)`, fork grouping by content hash, `GET /api/v1/search?lang=` returning the matched language's title/tags and `matched_lang`.
+New crate per spec §5.3 without mail and signup: hub registry (`internal_url` = `http://hub-<name>.chefs-hubs.svc:8080`), federation poller with backoff comparing `(updated_at, content_hash)` and each translation's `(lang, updated_at)`, `recipes_index` + `translations_index`, FTS with one row per `(hub, recipe, lang)` so translated titles and tags are searchable, fork grouping by content hash, `GET /api/v1/search?lang=` returning the matched language's title/tags and `matched_lang`.
 - Acceptance: two hubs indexed from manifests; a translation added on a hub appears in `ru` search after the next poll with no recipe change; forks grouped; recipes and translations removed on the next poll after unpublishing.
 
 ### RN-70 · platform search page on the apex (M)
@@ -32,9 +64,9 @@ Outbox table, sender loop with backoff, suppression list, provider trait with a 
 Resize photos to 1600 px in the browser before `POST /import/photo` so multi-photo imports stay under Cloudflare's 100 MB body cap.
 - Acceptance: six 12 MP photos upload under 100 MB total; server result unchanged.
 
-### RN-73 · Signup, magic-link owner login, provisioner, BYOK (L)
-Spec §4.6 and §5.4. Hub: `GET /api/v1/auth/magic?token=<expires>.<nonce>.<mac>` (HMAC-SHA256 over `NODE_API_KEY`, 10-minute validity, single use, sets `node_session`, redirects to `/#/`) and owner-only `POST /api/v1/auth/magic-link`; `hubctl login-link`. Platform: accounts, email verification via the outbox, subdomain choice, provisioner on `control_net` with the Docker socket exposing `create/remove/rotate-key/login-link`, "email me a sign-in link" for existing owners, hub-owner model keys stored in the gateway. `NODE_API_KEY` stays the master secret and is never rotated for login.
-- Acceptance: end to end on the VPS: email → subdomain → running hub → signed in through the emailed link with the key untouched; expired, tampered and reused links answer 401; MCP clients keep working throughout.
+### RN-73 · Signup, magic-link owner login, kube-rs provisioner, BYOK (L)
+Spec §4.6 and §5.4. Hub: `GET /api/v1/auth/magic?token=<expires>.<nonce>.<mac>` (HMAC-SHA256 over `NODE_API_KEY`, 10-minute validity, single use, sets `node_session`, redirects to `/#/`) and owner-only `POST /api/v1/auth/magic-link`; `hubctl login-link`. Platform: accounts, email verification via the outbox, subdomain choice, "email me a sign-in link" for existing owners, hub-owner model keys stored in the gateway. Provisioner: a `kube-rs` service in `chefs-system` whose `ServiceAccount` is bound to a `Role` limited to `StatefulSets`, `Secrets`, `Services`, `Ingresses` and PVCs in `chefs-hubs` (no Docker socket anywhere), exposing `create/remove/rotate-key/login-link` to the platform only. `NODE_API_KEY` stays the master secret and is never rotated for login.
+- Acceptance: end to end on the node: email → subdomain → running hub → signed in through the emailed link with the key untouched; expired, tampered and reused links answer 401; MCP clients keep working throughout; the provisioner's `ServiceAccount` cannot read `chefs-system` secrets.
 
 ### RN-21 · Lossy WebP covers (S/M)
 Covers are lossless today (about 1 MB for a 1200 px image). Decide between a
@@ -77,53 +109,6 @@ _(empty)_
 
 ## Done
 
-### RN-75 · Seeded `canonical_terms` dictionary (S)
-SQLite migration inserting `en`, `ru`, `nl` labels for the ~200 most common everyday ingredients (`salt`, `garlic`, `onion`, `butter`, `egg`, `olive_oil`, …) with `origin = 'human'` via `INSERT OR IGNORE`, so hubs never spend model tokens on basic terms and the gateway cache is not relied on for them (spec §4.3).
-- Acceptance: a fresh node labels `salt`/`garlic`/`onion` in all three languages with no model call (fake extractor records zero `translate_terms` calls); rows that already exist are untouched.
-
-- Done 2026-10-27: `migrations/20261027000001_seed_canonical_terms.sql` seeds 245 everyday canonical ids (seasonings, oils and condiments, dairy, grains and legumes, vegetables, fruit and nuts, meat and fish, plus common plural forms the heuristic normalizer produces such as `eggs`, `tomatoes`, `onions`) with `en`, `ru` and `nl` labels (735 rows) as `origin = 'human'` via `INSERT OR IGNORE`. The recipe-db upsert now lets a model (`llm`) label replace only `llm` rows (`DO UPDATE … WHERE excluded.origin = 'human' OR canonical_terms.origin <> 'human'`), so seeded and hand-corrected terms are never overwritten while a human label replaces anything. Side effect: anonymous readers now see seeded labels (they are cached), still with zero model calls. 4 new tests (seeds present in three languages with ≥ 600 rows and human origin; llm-vs-human overwrite rules; service labels `salt`/`garlic`/`onion` in ru/nl/en with zero `translate_terms` calls; API recipe view in all three languages with a counting fake at zero). Six existing tests moved to unseeded ids (`gochujang`, `doenjang`, `furikake`) or to the seeded labels (`beef_bones` → говяжьи кости / runderbotten, `star_anise` → бадьян, `egg` → яйцо).
-
-### RN-68 · llm-gateway v2: quotas, cache, admin API (M)
-Daily/monthly quotas, deterministic-reply cache, admin endpoints and BYOK per spec §5.2.
-- Acceptance: over-quota request gets 429 before any upstream call; a repeated label request is a cache hit; admin API tested.
-
-- Done 2026-10-27: quotas per spec §11 as per-hub columns (`Quota`, free tier by default): `onboarding_daily_requests` for `onboarding_days` after `created_at`, then `daily_request_limit`, plus `monthly_request_limit`, `monthly_cost_cap_cents` (needs `model_prices` rows) and an optional `daily_token_limit`; checked from `usage_daily` sums before any upstream call → 429 `{"type":"error","error":{"type":"quota_exceeded","message":…}}` (RN-67 names it on the hub). Cache: key = SHA-256 of vendor + model + canonical JSON (sorted keys, integral floats as integers, no whitespace), only `temperature` 0 and no streaming, 2xx only, TTL 30 days (`GATEWAY_CACHE_TTL_DAYS`), 1 MB bodies, LRU by `last_hit` above `GATEWAY_CACHE_MAX_ENTRIES` (10000); hits add no usage and return `x-gateway-cache: hit` (`miss`/`bypass` otherwise). BYOK: `POST /admin/hubs/{name}/byok {vendor,key}` / `DELETE …/byok/{vendor}`, JSON map encrypted with XChaCha20-Poly1305 under SHA-256(`GATEWAY_MASTER_KEY`); a BYOK hub's own key replaces the platform key and skips the quota, usage still recorded; admin listing shows `byok_vendors` only. Admin: `POST /admin/hubs {name, quota?}`, `PATCH /admin/hubs/{name}` (quota fields, `status` active|disabled; a disabled hub's token is refused), `DELETE /admin/hubs/{name}`, `GET /admin/cache/stats`. Deploy: `GATEWAY_MASTER_KEY` in compose/env.example, how-to §10 covers quotas, prices, BYOK and cache. 10 new tests (21 gateway tests, 237 workspace): over-quota 429 with 2 vendor calls, onboarding tier, monthly request and cost caps, token cap, BYOK bypass + key never listed, BYOK 503 without master key, reordered-keys cache hit across two hubs with no extra usage, no caching of 0.7 or errors, zero-TTL expiry + bounded table, PATCH/disable/DELETE flow. Two bugs caught by the tests on the way: a `%Y-%m-%` chrono pattern (invalid) and same-second expiry at zero TTL.
-
-### RN-67 · Hub: model quota-exceeded mapping (S)
-Gateway 429/402 surfaces as a readable `model_quota_exceeded` error (HTTP 429) instead of a generic model failure.
-- Acceptance: API test with a fake extractor returning the gateway's error.
-
-- Done 2026-10-27: `RigExtractor` classifies a failed model call through rig's `provider_response_status()`: 429 or 402 from the gateway or vendor becomes `ScraperError::ModelQuotaExceeded`, worded by the error envelope's type (`quota_exceeded` → "the model quota for this node is used up", `rate_limit_error` → "rate limit was reached, try again shortly", 402 → "the model account needs payment") with the endpoint's own message appended; other failures stay `Llm`. The API maps it to `ApiError::QuotaExceeded` → HTTP 429 `{"error": "model quota exceeded: …", "code": "model_quota_exceeded"}`; MCP tools report the same sentence. New `RigExtractor::connect(reference, base_url, api_key)` connects without environment variables (gateway or test server). 7 new tests (227 total): five drive a real `RigExtractor` against a fake vendor answering 429/402/500, one API test with a quota-failing extractor, one MCP tool test. The UI already shows the server message verbatim; a localized string keyed on `code` is a possible follow-up.
-
-### RN-66 · llm-gateway v1: passthrough, hub tokens, usage (M)
-New crate per spec §5.2: Messages-format passthrough, token auth, usage rows, vendor key custody. No cache or quota yet.
-- Acceptance: a hub works unchanged with `MINIMAX_ANTHROPIC_API_BASE` pointed at the gateway; usage recorded per hub.
-
-- Done 2026-10-27: new crate `crates/llm-gateway` (lib + binary, same distroless image as the hub, `entrypoint: llm-gateway`). `POST /{anthropic|minimax}/v1/messages` authenticates the hub token (`x-api-key` or bearer; SHA-256 stored in `hubs.token_hash`), swaps it for the vendor key, drops hop-by-hop/credential headers, forwards the body unchanged, retries once on 5xx/429 or a connect error, caps two in-flight calls per hub, returns the vendor reply as is and upserts `usage_daily` (requests, tokens, cost from `model_prices`, 0 when unpriced). On `/anthropic` MiniMax models route to MiniMax, others to Anthropic. `stream: true` → 501. Errors use the Messages error envelope. Admin API behind `GATEWAY_ADMIN_TOKEN`: `POST/GET /admin/hubs`, `GET /admin/usage?hub=&from=&to=`; CLI `add-hub`, `healthcheck`. Schema already carries the RN-68 quota/cache/BYOK columns. Deploy: compose service `llm-gateway` (64 MiB, read-only, admin port on 127.0.0.1:8090), `hubctl create` registers hubs at the gateway when `GATEWAY_ADMIN_TOKEN` is set and writes the hub token + `MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway:8080/anthropic` instead of the vendor key. 13 Rust tests (fake vendors), 3 hubctl tests (fake gateway). End-to-end 2026-10-27: a local node with its model base pointed at the gateway imported a text recipe through MiniMax unchanged (201, 4 canonical ids) and the gateway recorded 1 request / 230 in / 293 out tokens for that hub.
-
-### RN-65 · deploy/: Compose, Caddy, hubctl, backup job (M)
-Files described in the spec §3, §4.7, §5.5, §5.6 plus a deployment how-to for one VPS behind Cloudflare.
-- Acceptance: `hubctl create demo` brings up a routed hub on a fresh box; `hubctl backup demo` lands an archive in R2.
-
-- Done 2026-10-26: `deploy/` holds `hubctl` (Python stdlib: init, create, remove [--purge], list, status, rotate-key, login-link, backup <name|all> [--local|--keep-local], restore, upgrade), `compose.yml` (caddy-docker-proxy 2.11, `chefs_net` + internal `control_net`), `templates/Caddyfile.tmpl` (Cloudflare ranges as trusted proxies, `CF-Connecting-IP`, 110 MB bodies, access log drops `token`, `hub_common` snippet imported by the hub labels, TLS_MODE origin|off), `env.example`, `backup.sh` and `README.md` (DNS, Origin CA, firewall, install, R2 via rclone, restore, local dry run). Backups take a host-side `VACUUM INTO` until RN-30's export endpoint exists; §4.5 steps 2 and 5 (gateway token, platform registration) wait for RN-66/RN-69; `login-link` mints RN-73 tokens (HMAC key = the NODE_API_KEY string). 17 unit tests with fake docker/rclone. Local Docker smoke 2026-10-26 with the current image: `create demo` routed by Host through Caddy (health 200, owner POST 201), MCP initialize through Caddy 200 `text/event-stream` with `Cache-Control: no-cache` and `X-Accel-Buffering: no` in 3 ms, SSRF guard 400 through the stack, backup archive holds the created recipe, container read-only / 128 MiB / 0.5 CPU / uid 65532 / `chefs_net` only, remove --purge clean. Not exercised here: Cloudflare, Origin CA and R2 upload (need a VPS).
-
-### RN-74 · SSRF guard on user-supplied URL fetches (S)
-Harden `recipe-scraper` (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images, used by `ImportService::import_url`): resolve the hostname first and refuse loopback, link-local incl. cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918, CGNAT `100.64/10`, `fc00::/7`, multicast/unspecified addresses and any scheme other than `http`/`https`; re-check every redirect hop and connect to the checked address. A builder flag `allow_private_hosts` exists only for tests with local servers. Spec: `docs/SPEC-hosted-platform.md` §6.
-- Acceptance: tests show `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a public URL redirecting to a private address are refused with a clear error; public URLs still import; the model client is unaffected.
-
-- Done 2026-10-26: new `recipe-scraper/src/ssrf.rs`. `UrlGuard` checks scheme (`http`/`https` only), literal IP hosts and every DNS answer for a hostname; `blocked_reason` classifies loopback, RFC 1918, CGNAT `100.64/10`, link-local `169.254/16` + `fe80::/10`, ULA `fc00::/7`, multicast, unspecified and reserved ranges, judging IPv4 embedded in IPv6 (mapped, NAT64, 6to4) as IPv4. The importer's reqwest client uses `GuardedResolver` (system lookup, every answer checked, connection pinned to the checked address) and `redirect_policy` (scheme + literal IP re-checked per hop, 10-hop limit); redirects reqwest will not follow (`file:`, `ftp:`) are refused explicitly. New `ScraperError::BlockedUrl` → HTTP 400 (`refusing to fetch …`) and MCP invalid-input. `RecipeImporter::allow_private_hosts()` unlocks loopback/private/CGNAT/ULA for tests only, never link-local or multicast. Model client untouched (rig builds its own). 8 new tests (207 total), clippy and rustfmt clean.
-
-### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
-`NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
-- Acceptance: API tests: manifest lists a translation with its own `updated_at` after `PUT /recipes/{id}/translations/ru` without the recipe's `updated_at` changing; federated recipe carries it; public recipes only; allowlist derived from the URL.
-
-- Done 2026-10-26: `NODE_PUBLIC_URL` (validated absolute http(s) URL, trailing slash dropped) is published as manifest `node_url`; the default `/mcp` allowlist is loopback plus the URL's `host[:port]` (`default_mcp_allowed_hosts_with`), an explicit `NODE_MCP_ALLOWED_HOSTS` still wins. `ManifestEntry.translations: [{lang, origin, stale, updated_at}]` comes from one join over public recipes; `GET /federation/recipes/{id}` returns `FederatedRecipe` (recipe flat + `translations: [RecipeTranslation]`). SSE headers: rmcp 3.6 already sends `Cache-Control: no-cache` and `X-Accel-Buffering: no` on every event stream, so a regression test pins it instead of new code. 11 new tests (199 total), clippy and rustfmt clean.
-
-### RN-63 · Dockerfile, `healthcheck` subcommand and image publishing (S)
-Multi-stage `Dockerfile` (rust:1.97-slim-bookworm → distroless `cc-debian12:nonroot`, BuildKit cache mounts, `.dockerignore`), new `node-server healthcheck [--port] [--host]` subcommand (`crates/node-server/src/health.rs`: raw loopback HTTP GET of `/api/v1/health`, 2 s timeout, exit 0/1, port from `NODE_PORT`), image env `NODE_HOST=0.0.0.0 NODE_PORT=8080 NODE_DATA_DIR=/data TOKIO_WORKER_THREADS=2`, `/data` owned by uid 65532, `.github/workflows/docker.yml` building and smoke-testing on main/PRs and publishing `v*` tags to `ghcr.io/watchcat/chefsprodigy` (`<version>`, `<major.minor>`, `latest`). README and CLAUDE.md document it.
-- 8 new tests in `crates/node-server/tests/healthcheck.rs` (healthy node, nothing listening, error status, wrong body, silent server timeout, CLI exit codes 0/1, `NODE_PORT` default); 188 tests total, clippy clean.
-- Verified 2026-10-26 with a local `docker build` (arm64, 2m10s compile): container reported `healthy` after 9 s through its own probe; no `/bin/sh` in the image; process uid 65532; a recipe POST wrote to `/data` (201); `healthcheck --port 9` exited 1; image 13 MB compressed; 3.5 MiB RSS after a few requests. The first real GHCR publish happens on the first `v*` tag.
-
 ### RN-62 · UI: owner login and read-only mode for visitors (S)
 The PWA now checks `GET /api/v1/auth/me` before rendering a route, presents a native owner-key login dialog backed by `POST /api/v1/auth/login`, and offers `POST /api/v1/auth/logout`. Visitors see only public recipes and no create/edit/delete/import/translation-correction controls; direct write routes render an owner-access prompt, real `401` responses open the same login dialog, and the recipe detail explains that uncached display-language translations appear after the owner has viewed the recipe. Owner sessions use the existing HttpOnly cookie and survive reloads.
 - Verified in-browser 2026-10-24 via `scripts/devbuild.sh` against an isolated key-protected node: anonymous view contained only a public Dutch recipe, no write controls, a Russian cached-translation hint, and the protected `#/new` login prompt. After native-dialog sign-in, the session survived a reload, the owner saw the private recipe plus import/edit/delete controls, and logout restored public-only visitor mode.
@@ -164,3 +149,41 @@ Bug: on `#/recipe/{id}/edit` the title and eyebrow rendered one character per li
 ### RN-51 · Verify photo import with real photos (S)
 Verified 2026-10-23 with MiniMax-M3: a Marley Spoon card (front with hero photo + back with Dutch text) imports with the full title, 12 ingredients, 6 steps with timers, servings 2, cook 30 min, and the front photo as cover; an English card ("Willow Chicken in Black Bean Sauce") also imported. Fixes found on the way: `classification`/`type` keys for photo kinds, notes mentioning a dish photo promote a text page to cover, equipment filtered from ingredients, nested `times` objects, synthesized title when the card side has no title.
 Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pasta name sometimes misread ("torchiatelle").
+
+### RN-47 · Dev tooling: devbuild.sh, .env, per-toolchain target dirs (S)
+`scripts/devbuild.sh` builds, runs, seeds and opens the browser; loads `.env` (template `.env.example`, git-ignored); uses `target/rustc-<version>/` per toolchain and refuses a stale `DEVELOPER_DIR`.
+
+### RN-48 · MiniMax-M3 default and lenient model-reply parsing (M)
+`LLM_MODEL=minimax/MiniMax-M3` via `.env`; rig reads vendor variables unless `LLM_API_KEY` overrides. Replies with missing/renamed fields, string ranges, time phrases, decimal commas and unit spellings now parse; gateway errors and rejected replies are logged.
+
+### RN-49 · Navbar logo and PWA icons (S)
+PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and service-worker shell updated.
+
+### RN-50 · Kanban tooling (S)
+`scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`).
+
+### RN-39 · UI: shopping list builder (M)
+The PWA now has a `#/shopping` builder, linked from the library and primary navigation. It loads local recipes into an accessible multi-select basket with per-recipe serving inputs and optional comma-separated pantry exclusions. It calls `POST /api/v1/shopping-list`, separates basic groceries from specialty items, and persists the basket, pantry text, and independently checked grocery rows in `localStorage`.
+- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: Beef Pho and Quick Noodle Bowl produced an aggregated `600 g` Rice Noodles line for two recipes, Fish Sauce appeared under Specialty items, and Salt was excluded through the pantry field. A checked Rice Noodles row remained checked after a page reload and rebuilt list; browser console had no errors.
+
+### RN-46 · UI: import from photos (M)
+The import dialog now includes a responsive From photo tab with a camera-capable 1–6 image picker, local thumbnails, size/count feedback, a privacy disclosure, and visible analysis progress. It posts repeated multipart `photos` plus `is_public` to `POST /api/v1/import/photo`, renders errors inline, and opens a created recipe on success.
+- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a readable recipe-card JPEG imported through MiniMax-M3 as Lemon Herb Orzo and opened in detail; a logo image returned an inline 422 no-recipe message; an isolated no-model node returned the inline 503 vision-capability message. Browser console had no errors.
+
+### RN-45 · MCP: photo_paths on import_recipe (S)
+`import_recipe` accepts `photo_paths`; unreadable paths are reported in the tool error. End-to-end test over stdio with a fake vision extractor.
+
+### RN-44 · Backend: photo import endpoint and vision extraction (M)
+`POST /api/v1/import/photo` live: EXIF-oriented 1600 px JPEG normalization, one vision call (`PhotoExtraction`), lenient parsing, cover from the first dish photo, and 422/503 paths. The first MiniMax-M3 browser run is verified under RN-46.
+
+### RN-41 · UI: cover image upload in the editor (S)
+The editor accepts JPEG, PNG, and WebP images, then posts the selected file as multipart field `file` to `PUT /api/v1/recipes/{id}/image` after a recipe exists. It waits for the returned recipe and routes to its detail page, where the converted cover is rendered.
+- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a JPEG uploaded through the Beef Pho editor and the returned WebP cover rendered on both the recipe detail page and library card.
+
+### RN-35 · UI: manual recipe editor (M)
+The PWA now has `#/new` and `#/recipe/{id}/edit` views with accessible create/edit forms for title, description, servings, times, tags, provenance, visibility, normalized ingredients, specialty flags, and ordered timed steps. Ingredient and step rows are dynamically addable/removable; successful saves use the documented `POST` or `PUT` endpoint and API failures render inline.
+- Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: Browser Lemon Orzo was created from the form and opened in detail; the seeded Beef Pho recipe round-tripped all 5 ingredients, 5 specialty controls, 3 ordered instructions, and 3 timer controls through `PUT`; dynamic controls added a sixth ingredient and fourth step without persisting on Cancel. Browser console had no errors.
+
+### RN-43 · Drop the unused legacy vector mark (S)
+Removed the unreferenced 150 KB legacy vector app mark from the embedded bundle. The local PNG icon set remains the sole browser and manifest branding source, and the frontend scope now documents that arrangement.
+- Verified 2026-10-22: the static bundle is 176 KB and a repository-source scan finds no retired asset filename.

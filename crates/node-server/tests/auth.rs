@@ -318,10 +318,7 @@ async fn anonymous_readers_get_cached_translations_but_never_trigger_the_model()
         "no cached translation: source wording"
     );
     assert!(r["translation"].is_null());
-    assert_eq!(
-        r["ingredients"][0]["canonical_label"], "яйцо",
-        "a seeded dictionary label is cached, so anonymous readers get it for free"
-    );
+    assert!(r["ingredients"][0].get("canonical_label").is_none());
     assert_eq!(
         fake.calls.load(Ordering::SeqCst),
         0,
@@ -354,8 +351,8 @@ async fn anonymous_readers_get_cached_translations_but_never_trigger_the_model()
         "cached translation is served to everyone"
     );
     assert_eq!(
-        cached["ingredients"][0]["canonical_label"], "яйцо",
-        "cached labels too (egg comes from the seeded dictionary)"
+        cached["ingredients"][0]["canonical_label"], "ru:egg",
+        "cached labels too"
     );
     assert_eq!(
         fake.calls.load(Ordering::SeqCst),

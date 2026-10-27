@@ -1,40 +1,45 @@
-# Spec: Hosted platform on one VPS (hubs, model gateway, aggregator)
+# Spec: Hosted platform on one k3s node (hubs, model gateway, aggregator)
 
-Status: proposed, 2026-10-26; revised the same day after review (translations in
-federation, built-in healthcheck, network split and SSRF guard, magic-link login,
-cache canonicalization, seeded terms, resolved questions). Companion to
-`docs/ARCHITECTURE_AND_SCHEMAS.md` (the node), `docs/MCP_AND_API_SPEC.md` (its API) and
-`docs/SPEC-i18n.md`. Work items are tracked on the board in `docs/KANBAN.md` as RN-63 and up.
+Status: proposed, 2026-10-26; revised 2026-10-27 for k3s + Traefik + `kube-rs` (replacing the
+Docker Compose / Caddy design, whose first implementation was rolled back on the same day).
+Companion to `docs/ARCHITECTURE_AND_SCHEMAS.md` (the node), `docs/MCP_AND_API_SPEC.md` (its
+API) and `docs/SPEC-i18n.md`. Work items are tracked on the board in `docs/KANBAN.md` as
+RN-63 and up.
 
 ## 1. Objective
 
 Run many recipe hubs for many people under `chefslegacy.com`, one hub per subdomain
 (`jacob.chefslegacy.com`), with a central search over everything public on the apex, on a
-single VPS with Docker Compose. Each hub stays the small single binary that exists today.
-Everything that is shared, expensive or sensitive moves into two platform services:
+single VPS running **k3s**. Each hub stays the small single binary that exists today, packed
+in one container image. Everything that is shared, expensive or sensitive moves into two
+platform services, plus one small privileged one:
 
 - **llm-gateway**: the only process that talks to model vendors. Holds vendor keys, enforces
   per-hub quotas, caches deterministic replies, records usage.
 - **platform**: the apex site. Hub registry, aggregator (federation poller and search index),
   signup, transactional mail outbox, admin.
+- **provisioner** (phase 3): a `kube-rs` service that creates and removes hub workloads through
+  the Kubernetes API with a narrowly scoped `ServiceAccount`; nothing in the system touches a
+  container runtime socket.
 
 Rate limiting lives in two places and nowhere else: model spend at the gateway, HTTP abuse
-at the edge (Cloudflare rules and Caddy), so the per-node limiter (RN-28) becomes optional.
+at the edge (Cloudflare rules and Traefik middlewares), so the per-node limiter (RN-28)
+becomes optional.
 
 ## 2. Decisions taken as defaults
 
 | Topic | Decision | Alternative kept open |
 |---|---|---|
-| Hosting | One VPS (4 GB, 2 vCPU class), Docker Compose, Ubuntu LTS | Fly.io machines with the same image |
-| Edge | Cloudflare proxied (orange cloud) for apex and `*.chefslegacy.com`; Origin CA wildcard cert at Caddy; VPS firewall allows 443 only from Cloudflare IPs | DNS-only with ACME DNS-01 at Caddy |
-| Routing | Caddy with caddy-docker-proxy; routes come from container labels | Traefik |
-| Networks | Two internal Docker networks: `chefs_net` (Caddy, platform, hubs, llm-gateway) and `control_net` (platform, provisioner); hubs have no route to the provisioner | |
-| Hub image | `ghcr.io/watchcat/chefsprodigy:<version>`, distroless, non-root, `/data` volume, no shell tools; health via `node-server healthcheck` | |
+| Hosting | One VPS (4 GB, 2 vCPU class), Ubuntu LTS, single-node k3s (embedded containerd, Traefik, local-path storage, ServiceLB) | Fly.io machines with the same image; a second k3s node when one is full |
+| Edge | Cloudflare proxied (orange cloud) for apex and `*.chefslegacy.com`; Origin CA wildcard cert as Traefik's default certificate; VPS firewall allows 443 only from Cloudflare IPs | DNS-only with cert-manager and ACME DNS-01 |
+| Routing | k3s's bundled Traefik; one `Ingress` per hub and one for the apex; Traefik middlewares for body limits and headers | ingress-nginx |
+| Isolation | Namespaces `chefs-system` (gateway, platform, provisioner, backups) and `chefs-hubs` (one `StatefulSet` per hub); default-deny `NetworkPolicy` in `chefs-hubs`, hubs reach only DNS, the public internet and the gateway | |
+| Hub image | `ghcr.io/watchcat/chefsprodigy:<version>`, distroless, non-root, `/data` volume, no shell tools; health through kubelet `httpGet` probes plus `node-server healthcheck` for `docker run` and debugging | |
 | Model access | Hubs call llm-gateway only; gateway is a Rust crate in this workspace | LiteLLM proxy, Cloudflare AI Gateway |
 | Owner login | `NODE_API_KEY` stays the permanent master secret (API, MCP, direct login); short-lived signed magic links sign the owner in on any device without rotating it | |
 | Email | Transactional provider (Resend first) behind an outbox in `platform` | Postmark, SES |
-| Backups | Nightly per-hub export to Cloudflare R2 via rclone, 30-day retention by bucket lifecycle rule | restic |
-| Provisioning | `hubctl` CLI on the box (phase 0–2); platform-driven signup through a small privileged provisioner (phase 3) | |
+| Backups | Nightly `CronJob` in `chefs-system`: per-hub export to Cloudflare R2 via rclone, 30-day retention by bucket lifecycle rule | restic; Longhorn snapshots on a multi-node cluster |
+| Provisioning | `hubctl` CLI (Python, `kubectl`-based) for phases 0–2; platform-driven signup through the `kube-rs` provisioner in phase 3 | |
 | Model cost | Platform key with per-hub free-tier quotas (§5.2); owners may add their own key (BYOK in the gateway) | |
 
 ## 3. Architecture
@@ -44,53 +49,64 @@ at the edge (Cloudflare rules and Caddy), so the per-node limiter (RN-28) become
                    │
         Cloudflare: DNS, wildcard TLS, WAF, rate-limit rules, hides VPS IP
                    │  (firewall: only Cloudflare ranges may reach :443)
-   ────────────────┼───────────────────────────────── VPS ─────────────────────
+   ────────────────┼──────────────────────────── VPS: single-node k3s ──────────
                    ▼
-        Caddy (Origin CA cert; routes by Host header; sees CF-Connecting-IP)
-          chefslegacy.com        → platform:8080
-          jacob.chefslegacy.com  → hub-jacob:8080
-          maria.chefslegacy.com  → hub-maria:8080
-                   │
-        chefs_net (internal; nothing else is published)
-          ┌────────────┬────────────┬──────────────┬──────────────┐
-          │ hub-jacob  │ hub-maria  │ llm-gateway  │ platform     │
-          │ /data vol  │ /data vol  │ gateway.db   │ platform.db  │
-          └─────┬──────┴─────┬──────┴──────┬───────┴──────┬───────┘
-                │ model calls (hub token)  │ vendor key   │ polls manifests,
-                └──────────────────────────┘ MiniMax…     │ sends mail
-                                                          │
-        control_net (internal; platform and provisioner only)
-                                                          ▼
-                                                   provisioner (Docker socket)
-                                                          │
-                                                   Resend / Postmark (outbound mail)
-        backup job (cron): hub exports + gateway.db + platform.db → Cloudflare R2
+   kube-system     Traefik (ServiceLB on :443; default cert = Origin CA wildcard Secret;
+                   trusts Cloudflare ranges for the client IP; routes by Ingress host)
+                     chefslegacy.com        → platform.chefs-system:8080
+                     jacob.chefslegacy.com  → hub-jacob.chefs-hubs:8080
+                     maria.chefslegacy.com  → hub-maria.chefs-hubs:8080
+
+   chefs-system    ┌──────────────┬──────────────┬────────────────┬──────────────────┐
+                   │ llm-gateway  │ platform     │ provisioner    │ backup CronJob   │
+                   │ gateway.db   │ platform.db  │ (kube-rs, SA)  │ (rclone → R2)    │
+                   │ PVC          │ PVC          │                │                  │
+                   └──────┬───────┴──────┬───────┴───────┬────────┴────────┬─────────┘
+                          │ vendor key   │ polls         │ creates/removes │ reads hub
+                          │ MiniMax…     │ manifests     │ hub workloads   │ Secrets, calls
+                          │              │ sends mail    │ via the K8s API │ /api/v1/export
+   chefs-hubs      ┌──────┴───────┐ ┌────┴─────────┐     │                 │
+                   │ hub-jacob    │ │ hub-maria    │ ◄───┘                 │
+                   │ StatefulSet  │ │ StatefulSet  │                       │
+                   │ Secret, Svc, │ │ Secret, Svc, │ ◄─────────────────────┘
+                   │ Ingress, PVC │ │ Ingress, PVC │
+                   └──────────────┘ └──────────────┘
+                   NetworkPolicy: ingress only from Traefik and platform; egress only to
+                   DNS, public addresses and llm-gateway. No route to platform, provisioner,
+                   other hubs or the Kubernetes API.
 ```
 
-Hubs, the gateway and the platform share `chefs_net`; only the platform also joins
-`control_net`, where the provisioner listens. A hub therefore has no network route to the
-provisioner, and the SSRF guard in the hub (§6) stops a hub owner from reaching the gateway,
-other hubs or the platform through URL import.
+Hubs live in `chefs-hubs`, one `StatefulSet` each with a `Secret` (owner key, gateway token,
+settings), a `Service`, an `Ingress` and a `PersistentVolumeClaim` for `/data`. The gateway,
+the platform, the provisioner and the backup `CronJob` live in `chefs-system`. The
+`NetworkPolicy` set in `chefs-hubs` is default-deny: a hub accepts traffic from Traefik and
+from the platform's poller, and may open connections to DNS, to public addresses and to
+`llm-gateway.chefs-system`. The SSRF guard in the hub (§6) is the second line: even an
+allowed egress path refuses private destinations named by a user.
 
-Host layout:
+Cluster layout:
 
 ```
-/srv/chefslegacy/
-  compose.yml            caddy, llm-gateway, platform, provisioner, backup
-  compose.hubs.yml       generated by hubctl: one service per hub
-  .env                   platform-level secrets (vendor keys, admin tokens, R2)
-  caddy/                 Origin CA cert + key, Caddy data
-  gateway/data/          gateway.db
-  platform/data/         platform.db
-  hubs/<name>/.env       per-hub secrets (0600)
-  hubs/<name>/data/      recipes.db, images/
-  deploy/                hubctl, backup.sh, templates (checked into this repo under deploy/)
+deploy/k8s/
+  namespaces.yaml                chefs-system, chefs-hubs
+  traefik-config.yaml            HelmChartConfig for k3s's Traefik (§5.5), default TLSStore
+  network-policies.yaml          default deny in chefs-hubs + the allowed paths above
+  llm-gateway.yaml               Deployment, Service, PVC, Secret refs
+  platform.yaml                  Deployment, Service, PVC, apex Ingress
+  provisioner.yaml               Deployment, Service, ServiceAccount, Role, RoleBinding (phase 3)
+  backup-cronjob.yaml            nightly export → R2 (§4.7)
+  templates/hub.yaml.tmpl        StatefulSet + Secret + Service + Ingress for one hub
+deploy/hubctl                    Python, standard library, drives kubectl (§5.6)
+deploy/README.md                 how-to: k3s install, Cloudflare, Origin CA Secret, first hub
 ```
+
+On the node: `/var/lib/rancher/k3s/storage/` holds the local-path PVCs
+(`pvc-…_chefs-hubs_data-hub-jacob-0`, …), `/etc/rancher/k3s/` the kubeconfig.
 
 ## 4. Data flows
 
 ### 4.1 Visitor reads a recipe
-Browser → Cloudflare → Caddy (Host = `jacob.chefslegacy.com`) → `hub-jacob` → SQLite → JSON.
+Browser → Cloudflare → Traefik (Host = `jacob.chefslegacy.com`) → `hub-jacob` → SQLite → JSON.
 The hub applies the owner/visitor rules from RN-61: visitors see public recipes only and
 cached translations only. No platform service is involved.
 
@@ -98,7 +114,8 @@ cached translations only. No platform service is involved.
 1. Browser (session cookie) → hub. JSON-LD pages are parsed locally; no model call. Every
    user-supplied URL (page and images) passes the SSRF guard (§6) before it is fetched.
 2. For text, photos or ingredient normalization the hub sends a Messages-format request to
-   `http://llm-gateway:8080/anthropic/v1/messages` with its **hub token** as `x-api-key`.
+   `http://llm-gateway.chefs-system.svc:8080/anthropic/v1/messages` with its **hub token** as
+   `x-api-key`.
 3. Gateway: authenticate token → check daily/monthly quota → cache lookup → forward to the
    vendor with the real key → record usage (tokens, estimated cost) → return the vendor's
    reply unchanged. 429 with `{"error":{"type":"quota_exceeded"}}` when over quota.
@@ -123,10 +140,11 @@ exception. Two measures make the cache useful anyway:
   the model; later additions come as further `INSERT OR IGNORE` migrations.
 
 ### 4.4 Federation and search on the apex
-1. `platform` holds the registry: `name`, `internal_url` (`http://hub-jacob:8080`),
-   `public_url` (`https://jacob.chefslegacy.com`), owner, status.
+1. `platform` holds the registry: `name`, `internal_url`
+   (`http://hub-jacob.chefs-hubs.svc:8080`), `public_url` (`https://jacob.chefslegacy.com`),
+   owner, status.
 2. Every 10 minutes (with jitter) the poller fetches each hub's
-   `GET /api/v1/federation/manifest` over the internal network. Each manifest entry carries
+   `GET /api/v1/federation/manifest` inside the cluster. Each manifest entry carries
    `id`, `updated_at`, `content_hash` and `translations: [{lang, origin, stale, updated_at}]`
    (RN-64). Translations need their own timestamps because saving one never changes the
    recipe's `updated_at` or `content_hash`. The poller compares `(id, updated_at,
@@ -146,17 +164,19 @@ exception. Two measures make the cache useful anyway:
    source wording, and says which language matched (`matched_lang`).
 5. Optional push (phase 2): a hub notifies `POST platform/api/v1/hubs/{name}/changed` with its
    hub token after a public recipe or translation changes; the platform polls that hub
-   immediately.
+   immediately. The `NetworkPolicy` for that path is added only if the push is built.
 
 ### 4.5 Provisioning a hub (phase 0–2, CLI)
 `hubctl create jacob --chef "Jacob"`:
 1. Generate `NODE_API_KEY` (32 random bytes, hex).
 2. Ask the gateway admin API for a hub token with the default quota.
-3. Write `hubs/jacob/.env` (0600) with the hub settings (§5.1).
-4. Regenerate `compose.hubs.yml` from the template and `docker compose up -d hub-jacob`.
-5. Register the hub in `platform` (admin API) so the poller picks it up.
-6. Print the owner key once and a magic login link (`hubctl login-link jacob`, §4.6); the
-   key is stored nowhere else.
+3. Render `deploy/k8s/templates/hub.yaml.tmpl` for the hub: `Secret hub-jacob-env` (the hub
+   settings of §5.1), `StatefulSet hub-jacob` (1 replica, PVC `data`), `Service hub-jacob`,
+   `Ingress hub-jacob` for `jacob.chefslegacy.com`; `kubectl apply -n chefs-hubs`; wait for
+   the pod to be `Ready`.
+4. Register the hub in `platform` (admin API) so the poller picks it up.
+5. Print the owner key once and a magic login link (`hubctl login-link jacob`, §4.6); the
+   key lives only in the hub's `Secret`.
 
 ### 4.6 Owner login and signup
 
@@ -166,15 +186,16 @@ link so nobody has to type or keep a 64-character key:
 
 - Token: `<expires>.<nonce>.<mac>` where `expires` is a Unix timestamp at most 10 minutes
   ahead, `nonce` is 8 random bytes (hex) and
-  `mac = HMAC-SHA256(key = NODE_API_KEY, msg = "chefsprodigy-magic:" + expires + ":" + nonce)`.
+  `mac = HMAC-SHA256(key = NODE_API_KEY, msg = "chefsprodigy-magic:" + expires + ":" + nonce)`;
+  the key is the `NODE_API_KEY` string as configured.
 - `GET /api/v1/auth/magic?token=…` on the hub verifies the MAC in constant time, rejects
   expired or already-used tokens (an in-memory set of consumed nonces, pruned at expiry),
   sets the `node_session` cookie exactly as `POST /auth/login` does and redirects to `/#/`
   so the token leaves the address bar.
-- Who can mint a link: anything that holds the key. `hubctl login-link <name>` reads
-  `hubs/<name>/.env`; the provisioner offers `POST /hubs/{name}/login-link` to the platform
-  (phase 3); a logged-in owner can call `POST /api/v1/auth/magic-link` on their hub to sign
-  in on another device. The platform never stores `NODE_API_KEY`.
+- Who can mint a link: anything that holds the key. `hubctl login-link <name>` reads the
+  hub's `Secret` through `kubectl`; the provisioner offers `POST /hubs/{name}/login-link` to
+  the platform (phase 3); a logged-in owner can call `POST /api/v1/auth/magic-link` on their
+  hub to sign in on another device. The platform never stores `NODE_API_KEY`.
 - A link is sent only to the verified account email, is single use and expires in 10
   minutes, so a leaked mail is a small window. `rotate-key` stays for compromise only;
   rotating still invalidates sessions and MCP clients, which is now the exception rather
@@ -182,24 +203,29 @@ link so nobody has to type or keep a 64-character key:
 
 **Signup (phase 3).** Visitor on the apex enters email → platform writes a mail to the
 outbox → provider sends a verification link → visitor picks a free subdomain → platform calls
-the **provisioner** (a tiny privileged container on `control_net` that owns the Docker
-socket and exposes only `create/remove/rotate-key/login-link`) → hub starts → platform asks
-the provisioner for a magic link and emails "your hub is ready, sign in" with it; the owner
-key is shown once in the browser for API and MCP use. "Email me a sign-in link" on the apex
+the **provisioner** (`kube-rs` service in `chefs-system` whose `ServiceAccount` may manage
+`StatefulSets`, `Secrets`, `Services` and `Ingresses` in `chefs-hubs` and nothing else;
+exposes only `create/remove/rotate-key/login-link`) → hub pod starts → platform asks the
+provisioner for a magic link and emails "your hub is ready, sign in" with it; the owner key
+is shown once in the browser for API and MCP use. "Email me a sign-in link" on the apex
 repeats the last step for existing owners on any device.
 
 ### 4.7 Backup and restore
-Nightly cron on the host: for each hub, call `GET /api/v1/export` (owner key, produces a zip
-of a consistent SQLite copy via `VACUUM INTO` plus `images/`), then rclone to
-`r2://chefslegacy-backups/hubs/<name>/<date>.zip`; also copy `gateway.db` and `platform.db`.
-An R2 bucket lifecycle rule deletes objects after 30 days. Restore = `hubctl restore <name>
-<archive>` (stop hub, unpack into `hubs/<name>/data`, start). Owners can download the same
-export from their hub (RN-30).
+A `CronJob` in `chefs-system` runs nightly with a `ServiceAccount` that may read `Secrets` in
+`chefs-hubs`: for each hub it calls `GET /api/v1/export` (owner key from the hub's `Secret`;
+a zip of a consistent SQLite copy via `VACUUM INTO` plus `images/`) and uploads it with
+rclone to `r2://chefslegacy-backups/hubs/<name>/<date>.zip`; `gateway.db` and `platform.db`
+are exported the same way through their services' export endpoints. R2 credentials come from
+a `Secret` in `chefs-system`; an R2 bucket lifecycle rule deletes objects after 30 days.
+Restore = `hubctl restore <name> <archive>`: scale the `StatefulSet` to 0, unpack into the
+PVC through a short-lived helper pod (`kubectl cp`), scale back to 1. Owners can download
+the same export from their hub (RN-30).
 
 ### 4.8 Updates
-GitHub Actions builds and pushes the image on tags. `hubctl upgrade all` pulls and restarts
-hubs one by one; migrations run at startup. The gateway and platform are updated the same
-way; each has a health endpoint used by Compose.
+GitHub Actions builds and pushes the image on tags. `hubctl upgrade all` sets the new image
+tag on each hub `StatefulSet` one by one and waits for the pod to be `Ready` (migrations run
+at startup); the gateway and platform `Deployments` are updated the same way. A rollback is
+`kubectl rollout undo`.
 
 ## 5. Service contracts
 
@@ -209,15 +235,18 @@ way; each has a health endpoint used by Compose.
 - Federation exposes translations (RN-64): manifest entries gain
   `translations: [{lang, origin, stale, updated_at}]`; `GET /api/v1/federation/recipes/{id}`
   returns the recipe plus `translations: [RecipeTranslation]`. Public recipes only, as today.
+  This is what lets `platform` index translated titles and tags in `recipes_fts` (§5.3).
 - `node-server healthcheck [--port 8080]` subcommand (RN-63): one loopback GET of
   `/api/v1/health` with a 2 s timeout, exit code 0 or 1. The image then needs no `curl`
-  or `wget`, and the check costs one short-lived process instead of a shell tool.
-- Container defaults: `NODE_HOST=0.0.0.0`, `NODE_PORT=8080`, `NODE_DATA_DIR=/data`,
-  `TOKIO_WORKER_THREADS=2` (set by the Compose template; Tokio otherwise starts one worker
-  per host vCPU in every container).
+  or `wget`: `docker run` users get a `HEALTHCHECK` through the binary, and on k3s the
+  kubelet probes `/api/v1/health` over HTTP itself (`readinessProbe`/`livenessProbe`
+  `httpGet`), with the subcommand available for `kubectl exec` debugging.
+- Container spec defaults: `NODE_HOST=0.0.0.0`, `NODE_PORT=8080`, `NODE_DATA_DIR=/data`,
+  `TOKIO_WORKER_THREADS=2` (set in the image and repeated in the pod template; Tokio
+  otherwise starts one worker per host vCPU in every container).
 - Model via gateway, environment only:
   `LLM_MODEL=minimax/MiniMax-M3`,
-  `MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway:8080/anthropic`,
+  `MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway.chefs-system.svc:8080/anthropic`,
   `MINIMAX_API_KEY=<hub token issued by the gateway>`.
   rig already honours these variables; no client code changes.
 - Map gateway 429/402 to a clear `model_quota_exceeded` error (HTTP 429 from the hub) so
@@ -226,14 +255,15 @@ way; each has a health endpoint used by Compose.
 - Magic-link login: `GET /api/v1/auth/magic?token=` and owner-only
   `POST /api/v1/auth/magic-link` (RN-73, §4.6).
 - Streaming responses (`/mcp` SSE) carry `Cache-Control: no-cache` and
-  `X-Accel-Buffering: no` so neither Caddy nor Cloudflare buffers them (RN-64).
+  `X-Accel-Buffering: no` so Cloudflare does not buffer them; Traefik flushes
+  `text/event-stream` responses as they arrive (RN-64).
 - `GET /api/v1/export` (owner): zip with `recipes.db` (VACUUM INTO) and `images/`; and
   `POST /api/v1/import/export` to restore into an empty node (RN-30).
 - Dockerfile (RN-63): multi-stage build, distroless (`gcr.io/distroless/cc` or `static`)
   runtime, non-root user, `/data` volume, `HEALTHCHECK` through the binary's own
   subcommand, image under 30 MB compressed.
 
-Per-hub environment file (`hubs/<name>/.env`):
+Per-hub `Secret` (`hub-<name>-env` in `chefs-hubs`, consumed with `envFrom`):
 
 ```
 NODE_API_KEY=…                 owner secret (generated)
@@ -242,25 +272,14 @@ NODE_AUTHOR_DID=did:key:…      optional
 NODE_PUBLIC_URL=https://jacob.chefslegacy.com
 NODE_MCP_ALLOWED_HOSTS=jacob.chefslegacy.com
 LLM_MODEL=minimax/MiniMax-M3
-MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway:8080/anthropic
+MINIMAX_ANTHROPIC_API_BASE=http://llm-gateway.chefs-system.svc:8080/anthropic
 MINIMAX_API_KEY=…              hub token (gateway-issued), not the vendor key
 ```
 
 ### 5.2 llm-gateway (new crate `crates/llm-gateway`)
-Purpose: vendor key custody, quotas, cache, usage. Memory target under 30 MB.
-
-Status: v1 shipped 2026-10-27 (RN-66): `/anthropic/v1/messages` and `/minimax/v1/messages`
-passthrough (on the `/anthropic` prefix MiniMax models route to MiniMax, others to Anthropic),
-hub tokens (`x-api-key` or bearer, stored hashed), `usage_daily` rows, one retry on 5xx/429,
-two in-flight calls per hub, `stream: true` → 501, admin `POST/GET /admin/hubs` and
-`GET /admin/usage`, `llm-gateway add-hub` CLI, `healthcheck` subcommand. v2 shipped
-2026-10-27 (RN-68): free-tier quotas as below (per-hub columns, `PATCH /admin/hubs/{name}`),
-429 `quota_exceeded` before any upstream call, the canonical-JSON reply cache (sorted keys,
-integral floats as integers, `temperature` 0 and no streaming only, 2xx only, 30-day TTL,
-1 MB bodies, LRU by `last_hit` above `GATEWAY_CACHE_MAX_ENTRIES`; `x-gateway-cache:
-hit|miss|bypass`), BYOK keys encrypted with XChaCha20-Poly1305 under `GATEWAY_MASTER_KEY`
-(`POST /admin/hubs/{name}/byok`, `DELETE …/byok/{vendor}`; BYOK hubs skip the platform
-quota, usage still recorded), `DELETE /admin/hubs/{name}` and `GET /admin/cache/stats`.
+Purpose: vendor key custody, quotas, cache, usage. Memory target under 30 MB. Runs as a
+`Deployment` in `chefs-system` with a PVC for `gateway.db`; vendor keys, the admin token and
+the master key come from a `Secret`.
 
 Endpoints (data plane, hub token in `x-api-key` or `Authorization: Bearer`):
 - `POST /anthropic/v1/messages`: Messages-format passthrough (MiniMax, Anthropic). `stream: true`
@@ -286,11 +305,12 @@ Behaviour:
   Token counters stay as a secondary cap (`daily_token_limit`). Over quota → 429 before any
   upstream call. BYOK hubs skip the platform limits entirely.
 - Cache: key = SHA-256 of vendor, model and the **canonical JSON** of the request body:
-  object keys sorted recursively, no insignificant whitespace, numbers and strings as
-  serde_json emits them, and the hub's own credential excluded. Only when the body has
-  `temperature` 0 and no streaming; never cache non-2xx; TTL 30 days; response size cap
-  1 MB; LRU by `last_hit` when the table exceeds a configured size. Two hubs that send the
-  same content therefore hit the same entry even if their serializers differ (§4.3).
+  object keys sorted recursively, no insignificant whitespace, integral floats written as
+  integers (`0.0` and `0` are the same temperature), strings as serde_json emits them, and
+  the hub's own credential excluded. Only when the body has `temperature` 0 and no
+  streaming; never cache non-2xx; TTL 30 days; response size cap 1 MB; LRU by `last_hit`
+  when the table exceeds a configured size. Two hubs that send the same content therefore
+  hit the same entry even if their serializers differ (§4.3).
 - Concurrency: at most 2 in-flight upstream calls per hub; 120 s upstream timeout; one retry
   with backoff on 5xx and on vendor 429.
 - Logging: hub, model, cache hit, tokens, latency, status. Prompt content only with
@@ -310,7 +330,8 @@ model_prices(vendor, model, input_cents_per_mtok, output_cents_per_mtok)
 Tokens are stored hashed; BYOK keys encrypted with `GATEWAY_MASTER_KEY`.
 
 ### 5.3 platform (new crate `crates/platform`)
-Purpose: apex site, registry, aggregator, signup, mail. Memory target under 128 MB.
+Purpose: apex site, registry, aggregator, signup, mail. Memory target under 128 MB. Runs as
+a `Deployment` in `chefs-system` with a PVC for `platform.db`; the apex `Ingress` points at it.
 
 Public API and pages:
 - `GET /` landing and search page (dependency-free UI like the hub's, same design tokens
@@ -356,61 +377,115 @@ Mail outbox:
 
 Phase 3 additions: `accounts(email, created_at)`, `magic_links(token_hash, email, expires_at)`
 (platform-side email verification; distinct from hub magic links), subdomain validation
-(`^[a-z0-9][a-z0-9-]{1,30}$`, reserved names), provisioner client over `control_net`.
+(`^[a-z0-9][a-z0-9-]{1,30}$`, reserved names), provisioner client inside `chefs-system`.
 
-### 5.4 provisioner (phase 3, tiny privileged service)
-Runs with the Docker socket, joins `control_net` only (never `chefs_net`), admin token
-required. `POST /hubs {name, chef}` / `DELETE /hubs/{name}` / `POST /hubs/{name}/rotate-key`
-/ `POST /hubs/{name}/login-link → {url, expires_at}` execute the same steps as `hubctl`,
-reading `hubs/<name>/.env` on the host for the key. Keeping the socket and the keys out of
-`platform` limits the blast radius; hubs cannot reach it at all.
+### 5.4 provisioner (phase 3, `kube-rs` service with scoped RBAC)
+A small Rust service (`crates/provisioner`, `kube-rs`) in `chefs-system`. Its
+`ServiceAccount` is bound to a `Role` in `chefs-hubs` that allows `get/list/watch/create/
+update/patch/delete` on `statefulsets`, `secrets`, `services`, `ingresses` and
+`persistentvolumeclaims` in that namespace only; no cluster-wide rights, no access to
+`chefs-system` secrets, no container runtime socket anywhere in the system. A
+`NetworkPolicy` admits connections only from the platform pod. Admin token required.
+`POST /hubs {name, chef}` / `DELETE /hubs/{name}` / `POST /hubs/{name}/rotate-key` /
+`POST /hubs/{name}/login-link → {url, expires_at}` render the same manifests as `hubctl`
+(shared template) and apply them through the API server; `login-link` reads the hub's
+`Secret` for the key. Keeping key access in this one narrowly-privileged pod limits the blast
+radius; hubs cannot reach it at all.
 
-### 5.5 Caddy
-caddy-docker-proxy image on `chefs_net`. Global: Origin CA certificate for
-`*.chefslegacy.com` and the apex; `trusted_proxies` set to Cloudflare ranges so
-`CF-Connecting-IP` becomes the client IP; request body limit 110 MB (Cloudflare's own cap is
-100 MB on the free plan); `flush_interval -1` on hub routes so SSE from `/mcp` streams
-through; access-log filter that deletes the `token` query parameter on
-`/api/v1/auth/magic`. Per hub, the labels in the template below; the apex route points at
-`platform`.
+### 5.5 Traefik
+k3s installs Traefik; it is configured through a `HelmChartConfig` in `kube-system`
+(`deploy/k8s/traefik-config.yaml`), never edited by hand on the node:
+- `ports.websecure.forwardedHeaders.trustedIPs` = Cloudflare ranges, so `X-Forwarded-For`
+  and `CF-Connecting-IP` are trusted and hubs see the visitor's address; `ports.web`
+  redirects to `websecure`.
+- Default certificate: a `TLSStore default` referencing `Secret chefs-origin-tls` in
+  `kube-system`, the Cloudflare Origin CA certificate for `chefslegacy.com` and
+  `*.chefslegacy.com` (15 years); hub `Ingresses` only enable TLS and inherit it. Cloudflare
+  SSL mode "Full (strict)".
+- Middlewares in `chefs-system`, referenced by annotation from every hub `Ingress` and the
+  apex: `buffering` with `maxRequestBodyBytes: 115343360` (110 MB; Cloudflare's own cap is
+  100 MB on the free plan), `headers` setting the usual security headers.
+- Streaming: Traefik flushes `text/event-stream` responses immediately regardless of
+  `flushInterval`, so `/mcp` SSE passes without configuration; the hub's `Cache-Control:
+  no-cache` and `X-Accel-Buffering: no` headers take care of Cloudflare.
+- Access logs stay off at Traefik (they would record the magic-link `token` query string);
+  the hub and the platform log their own requests without query strings. Error-level Traefik
+  logs stay on.
 
-### 5.6 hubctl (`deploy/hubctl`, Python, standard library)
-Commands: `init`, `create`, `remove [--purge]`, `list`, `rotate-key`, `login-link`, `backup`,
-`restore`, `upgrade [name|all]`, `status`. Idempotent; refuses names that are not valid
-subdomains or collide with reserved ones (`www`, `api`, `mail`, `admin`, `gateway`).
+### 5.6 hubctl (`deploy/hubctl`, Python, standard library, `kubectl`-based)
+Commands: `init` (namespaces, policies, Traefik config, gateway, platform, backup `CronJob`),
+`create`, `remove [--purge]`, `list`, `rotate-key`, `login-link`, `backup`, `restore`,
+`upgrade [name|all]`, `status`. Idempotent (`kubectl apply`); refuses names that are not
+valid subdomains or collide with reserved ones (`www`, `api`, `mail`, `admin`, `gateway`,
+`platform`). Runs on the node as root (kubeconfig in `/etc/rancher/k3s/k3s.yaml`) or from
+any machine with a kubeconfig.
 
-Hub service template:
+Hub template (`deploy/k8s/templates/hub.yaml.tmpl`, rendered per hub):
 
 ```yaml
-hub-{{name}}:
-  image: ghcr.io/watchcat/chefsprodigy:{{version}}
-  env_file: hubs/{{name}}/.env
-  environment:
-    TOKIO_WORKER_THREADS: "2"
-  volumes: ["./hubs/{{name}}/data:/data"]
-  networks: [chefs_net]
-  labels:
-    caddy: {{name}}.chefslegacy.com
-    caddy.reverse_proxy: "{{upstreams 8080}}"
-    caddy.reverse_proxy.flush_interval: "-1"
-  mem_limit: 128m
-  cpus: "0.5"
-  read_only: true
-  tmpfs: ["/tmp"]
-  security_opt: ["no-new-privileges:true"]
-  restart: unless-stopped
-  healthcheck:
-    test: ["CMD", "/usr/local/bin/node-server", "healthcheck"]
-    interval: 30s
-    timeout: 3s
+apiVersion: v1
+kind: Secret
+metadata: {name: hub-{{name}}-env, namespace: chefs-hubs}
+stringData: {NODE_API_KEY: "{{key}}", NODE_CHEF_NAME: "{{chef}}", NODE_PUBLIC_URL: "https://{{name}}.chefslegacy.com",
+             LLM_MODEL: "minimax/MiniMax-M3", MINIMAX_ANTHROPIC_API_BASE: "http://llm-gateway.chefs-system.svc:8080/anthropic",
+             MINIMAX_API_KEY: "{{gateway_token}}"}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: hub-{{name}}, namespace: chefs-hubs, labels: {app: hub, hub: {{name}}}}
+spec:
+  serviceName: hub-{{name}}
+  replicas: 1
+  selector: {matchLabels: {app: hub, hub: {{name}}}}
+  template:
+    metadata: {labels: {app: hub, hub: {{name}}}}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: node
+          image: ghcr.io/watchcat/chefsprodigy:{{version}}
+          args: ["serve"]
+          env: [{name: TOKIO_WORKER_THREADS, value: "2"}]
+          envFrom: [{secretRef: {name: hub-{{name}}-env}}]
+          ports: [{containerPort: 8080, name: http}]
+          volumeMounts: [{name: data, mountPath: /data}, {name: tmp, mountPath: /tmp}]
+          resources: {requests: {cpu: 50m, memory: 32Mi}, limits: {cpu: 500m, memory: 128Mi}}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          readinessProbe: {httpGet: {path: /api/v1/health, port: http}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /api/v1/health, port: http}, periodSeconds: 30, failureThreshold: 3}
+      volumes: [{name: tmp, emptyDir: {}}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec: {accessModes: [ReadWriteOnce], storageClassName: local-path, resources: {requests: {storage: 2Gi}}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: hub-{{name}}, namespace: chefs-hubs}
+spec: {selector: {app: hub, hub: {{name}}}, ports: [{port: 8080, targetPort: http}]}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hub-{{name}}
+  namespace: chefs-hubs
+  annotations: {traefik.ingress.kubernetes.io/router.entrypoints: websecure,
+                traefik.ingress.kubernetes.io/router.middlewares: chefs-system-buffering@kubernetescrd,chefs-system-headers@kubernetescrd}
+spec:
+  tls: [{hosts: ["{{name}}.chefslegacy.com"]}]
+  rules:
+    - host: {{name}}.chefslegacy.com
+      http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: hub-{{name}}, port: {number: 8080}}}}]}
 ```
 
 ## 6. Security
 
-- Only Caddy publishes ports; the VPS firewall admits 443 from Cloudflare ranges and 22 from
-  your addresses. Fail2ban on SSH.
-- Network isolation: `chefs_net` for Caddy, hubs, gateway and platform; `control_net` for
-  platform and provisioner only. No hub can open a connection to the provisioner.
+- Only Traefik is published (ServiceLB on 443; 80 redirects); the VPS firewall admits 443
+  from Cloudflare ranges, 22 from your addresses and nothing else; the k3s API (6443) is
+  bound to localhost and reached through SSH. Fail2ban on SSH.
+- Namespace isolation: `chefs-hubs` is default-deny. A hub accepts ingress from Traefik
+  (`kube-system`) and from the platform (the poller) and may egress to DNS, to public
+  addresses and to `llm-gateway.chefs-system`. It cannot reach other hubs, the platform, the
+  provisioner or the Kubernetes API (`automountServiceAccountToken: false`, no RBAC).
 - SSRF guard (RN-74): everything in `recipe-scraper` that fetches a user-supplied URL
   (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images) resolves the
   hostname first and refuses loopback (`127.0.0.0/8`, `::1`), link-local including cloud
@@ -419,68 +494,77 @@ hub-{{name}}:
   unspecified addresses, and any scheme other than `http`/`https`. Redirects are followed
   manually (or through a redirect policy) so every hop is checked again, and the connection
   is made to the resolved, checked address so DNS rebinding cannot swap it. A builder flag
-  (`allow_private_hosts`) exists only for tests with local servers. The model client is not
-  affected: it talks to the gateway address from configuration, not to user input.
-- Secrets: vendor keys only in the gateway's environment; each hub sees only its own owner
-  key and its gateway token; tokens hashed at rest; BYOK keys encrypted; backups uploaded
-  with an rclone `crypt` remote. The platform never holds `NODE_API_KEY`; magic links are
-  minted where the key lives (§4.6).
+  (`allow_private_hosts`) exists only for tests with local servers. Cluster service
+  addresses fall in these ranges, so the guard also blocks a hub owner from pointing an
+  import at the gateway, the platform or another hub even where a `NetworkPolicy` allows the
+  path. The model client is not affected: it talks to the gateway address from
+  configuration, not to user input.
+- Secrets: vendor keys, the gateway master key and the admin tokens live in `Secrets` in
+  `chefs-system`; each hub's `Secret` holds only its owner key and its gateway token; tokens
+  hashed at rest in the gateway and platform; BYOK keys encrypted; backups uploaded with an
+  rclone `crypt` remote. The platform never holds `NODE_API_KEY`; magic links are minted
+  where the key lives (§4.6). `kubectl get secret` access is root on the node and the
+  provisioner's and backup job's `ServiceAccounts` only.
 - Magic links: HMAC over the owner key, 10-minute expiry, single use, delivered only to the
-  verified account email, token removed from the URL by the redirect, query stripped from
-  Caddy's access log.
-- Containers: non-root, read-only root filesystem, memory and CPU caps, no Docker socket
-  except the provisioner.
+  verified account email, token removed from the URL by the redirect, no edge access log.
+- Pods: non-root (uid 65532), read-only root filesystem, all capabilities dropped,
+  `RuntimeDefault` seccomp, memory and CPU limits, `/tmp` on `emptyDir`.
 - Abuse: Cloudflare rate-limit rule on `/api/v1/*` for anonymous traffic and a bot rule for
-  the apex search; Caddy rate limit as a second layer; the gateway's quotas bound model spend
-  even if a hub owner's key leaks.
+  the apex search; a Traefik `rateLimit` middleware as a second layer; the gateway's quotas
+  bound model spend even if a hub owner's key leaks.
 - Privacy: gateway logs metadata only by default; the aggregator indexes only what hubs mark
   public (recipes and their translations alike); export archives belong to the owner.
 
 ## 7. Capacity and limits
 
-- Hub idle memory is still unmeasured (RN-31). Planning assumption: 20–40 MB idle, 128 MB cap.
+- k3s itself (API server, etcd-in-SQLite, Traefik, CoreDNS, local-path, metrics-server) takes
+  roughly 700 MB to 1 GB of RAM on an idle node. Hub idle memory is still unmeasured
+  (RN-31); planning assumption 20–40 MB idle, 128 MB limit, 32 MB request.
   `TOKIO_WORKER_THREADS=2` keeps thread count and stack memory independent of the host's
-  core count. A 4 GB VPS therefore carries 20–30 hubs with headroom for the gateway and
-  platform; move to a second box or Fly machines beyond that.
-- CPU: photo normalization and WebP encoding are the heavy paths; the 0.5-core cap keeps a
+  core count. A 4 GB VPS therefore carries 15–25 hubs with headroom for the gateway and
+  platform; an 8 GB box roughly doubles that; beyond that, add a node to the same cluster
+  (the manifests do not change).
+- CPU: photo normalization and WebP encoding are the heavy paths; the 500m limit keeps a
   burst from one hub off the others.
+- Storage: local-path PVCs are directories on the node's disk; 2 Gi per hub is a request,
+  not a quota. Watch disk use; the backup `CronJob` is the recovery path.
 - Cloudflare free plan: 100 MB request body. Multi-photo imports and Mealie archives can
   exceed it; the UI should downscale photos client-side before upload (RN-72) and the docs
   should point large Mealie imports at `hubctl restore` or a temporary DNS-only hostname.
 - MCP over Streamable HTTP goes through Cloudflare on the normal hostname (§11); the hub's
-  no-buffering headers and Caddy's `flush_interval -1` make the SSE stream pass unbuffered.
+  no-buffering headers and Traefik's native SSE flushing make the stream pass unbuffered.
   Verify once on the first hosted hub.
 
 ## 8. Observability
 
-Container logs via `docker logs` (optionally Dozzle); Compose health checks through
-`node-server healthcheck`; gateway usage and cache stats via its admin API; platform
-`/admin/hubs` shows last poll per hub; an external uptime monitor on the apex and one hub.
-No metrics stack in v1.
+`kubectl logs` and `kubectl get pods -n chefs-hubs` (readiness from the probes);
+`kubectl top` through metrics-server for the memory numbers RN-31 needs; gateway usage and
+cache stats via its admin API; platform `/admin/hubs` shows last poll per hub; an external
+uptime monitor on the apex and one hub. No metrics stack in v1.
 
 ## 9. Rollout
 
-- **Phase 0, this week**: Dockerfile with the `healthcheck` subcommand and image
-  publishing; `NODE_PUBLIC_URL`, manifest `node_url` and translations in federation; SSRF
-  guard; `deploy/` with Compose (two networks), Caddy and `hubctl`; run
-  `watchcat.chefslegacy.com` as the first hub behind Cloudflare. Model calls still go
-  straight to MiniMax.
-- **Phase 1**: llm-gateway v1 (passthrough, tokens, quotas, usage, canonical cache); hubs
-  switch to it; seeded canonical terms; export endpoint and nightly backups; memory
-  measurement.
+- **Phase 0**: Dockerfile with the `healthcheck` subcommand and image publishing;
+  `NODE_PUBLIC_URL`, manifest `node_url` and translations in federation; SSRF guard;
+  `deploy/k8s/` with namespaces, network policies, Traefik config and the hub template,
+  `hubctl` over `kubectl`; run `watchcat.chefslegacy.com` as the first hub behind
+  Cloudflare on a fresh k3s node. Model calls still go straight to MiniMax.
+- **Phase 1**: llm-gateway v1 (passthrough, tokens, usage) and v2 (quotas, canonical cache,
+  admin API, BYOK); hubs switch to it; seeded canonical terms; export endpoint and the
+  nightly backup `CronJob`; memory measurement.
 - **Phase 2**: platform with registry, poller, index (recipes and translations) and search
   page on the apex; `hubctl` registers hubs; optional change push from hubs.
-- **Phase 3**: signup with email verification, magic-link owner login, mail outbox,
-  provisioner, BYOK, client-side photo downscaling.
+- **Phase 3**: signup with email verification, magic-link owner login, mail outbox, the
+  `kube-rs` provisioner with scoped RBAC, BYOK, client-side photo downscaling.
 
 ## 10. Work breakdown
 
 | Story | Size | Scope | Acceptance |
 |---|---|---|---|
-| RN-63 Dockerfile, `healthcheck` subcommand, image publishing | S | multi-stage build, distroless, non-root, `/data`, `node-server healthcheck`, `HEALTHCHECK` through it, `TOKIO_WORKER_THREADS` documented, GitHub Actions to GHCR on tags | `docker run` reports healthy with no `curl` in the image; image < 30 MB compressed |
+| RN-63 Dockerfile, `healthcheck` subcommand, image publishing | S | multi-stage build, distroless, non-root, `/data`, `node-server healthcheck`, `HEALTHCHECK` through it, `TOKIO_WORKER_THREADS=2` in the image and the pod template, GitHub Actions to GHCR on tags | `docker run` reports healthy with no `curl` in the image; image < 30 MB compressed |
 | RN-64 `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers | S | config, manifest `node_url` and per-entry `translations`, `translations` on the federated recipe, MCP allowlist default, no-buffering headers on SSE | API tests: manifest lists a translation with its own `updated_at`; federated recipe carries it; allowlist derived from the URL |
-| RN-74 SSRF guard in `recipe-scraper` | S | §6: resolve and block private, loopback, link-local and metadata ranges, non-HTTP schemes, re-check every redirect hop; test-only `allow_private_hosts` | tests: `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a redirect to a private address are all refused; public URLs still import |
-| RN-65 `deploy/`: Compose, Caddy, hubctl, backup job | M | files in §3/§5.5/§5.6/§4.7 with the two networks and `login-link`, docs | `hubctl create demo` brings up a routed hub on a fresh box; `backup` lands in R2; MCP streams through Cloudflare |
+| RN-74 SSRF guard in `recipe-scraper` | S | §6: resolve and block private, loopback, link-local and metadata ranges, non-HTTP schemes, re-check every redirect hop; test-only `allow_private_hosts` | tests: `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway.chefs-system.svc:8080/` and a redirect to a private address are all refused; public URLs still import |
+| RN-65 `deploy/k8s/`: namespaces, policies, Traefik config, hub template, `hubctl`, backup `CronJob` | M | files in §3/§5.5/§5.6/§4.7 with the two namespaces and `login-link`, how-to for a fresh k3s node | `hubctl create demo` brings up a routed hub on a fresh node; the `CronJob` lands an archive in R2; MCP streams through Cloudflare and Traefik |
 | RN-30 Backup and restore of the node | M | `GET /api/v1/export`, restore import | round trip preserves ids, hashes, covers and translations |
 | RN-66 llm-gateway v1: passthrough, tokens, usage | M | §5.2 without cache/quota | hub works unchanged against the gateway; usage rows recorded |
 | RN-67 Hub: quota-exceeded mapping | S | 429 passthrough with a readable message | API test |
@@ -490,8 +574,8 @@ No metrics stack in v1.
 | RN-70 platform search page | M | apex UI reusing hub design tokens | search in `ru` finds a Dutch recipe via its translation when the hub exposes it |
 | RN-71 mail outbox and Resend adapter | S | §5.3 outbox | retries and suppression tested with a fake provider |
 | RN-72 UI: client-side photo downscale | S | resize to 1600 px before upload | 6-photo import stays under 100 MB |
-| RN-73 signup, magic-link login, provisioner, BYOK | L | §4.6, §5.4: hub `auth/magic` + `auth/magic-link`, `hubctl login-link`, provisioner `login-link`, platform login-link mail | end-to-end: email → subdomain → running hub → signed in through the emailed link, key never rotated; expired and reused links are refused |
-| RN-31 Idle memory measurement | S | existing story, now required | number recorded; informs §7 |
+| RN-73 signup, magic-link login, `kube-rs` provisioner, BYOK | L | §4.6, §5.4: hub `auth/magic` + `auth/magic-link`, `hubctl login-link`, provisioner with scoped RBAC in `chefs-hubs`, platform login-link mail | end-to-end: email → subdomain → running hub → signed in through the emailed link, key never rotated; expired and reused links are refused; the provisioner's `ServiceAccount` cannot read `chefs-system` secrets |
+| RN-31 Idle memory measurement | S | existing story, now required; `kubectl top` on the first hosted hub | number recorded; informs §7 |
 
 ## 11. Decisions on former open questions
 
@@ -500,11 +584,17 @@ No metrics stack in v1.
    by both). No npm, no CDN.
 2. **MCP through Cloudflare**: Streamable HTTP on `/mcp` goes through the proxied hostname.
    The hub sends `Cache-Control: no-cache` and `X-Accel-Buffering: no` on SSE responses and
-   Caddy uses `flush_interval -1`. A separate DNS-only `mcp.<name>` hostname is added only if
-   buffering is actually observed.
+   Traefik flushes event streams as they arrive. A separate DNS-only `mcp.<name>` hostname
+   is added only if buffering is actually observed.
 3. **Default free-tier quotas**: 30 model requests per day for the first 3 days after the hub
    is created, then 10 per day, capped at 150 requests or 1.00 USD per month, unless the
    owner configures BYOK in the gateway.
 4. **Retention**: backups live 30 days in R2 through a bucket lifecycle rule. A removed hub's
-   data stays on disk until `hubctl remove --purge`, after which only the R2 copies remain
-   and expire the same way.
+   PVC stays until `hubctl remove --purge`, after which only the R2 copies remain and
+   expire the same way.
+5. **Why k3s instead of Docker Compose**: declarative manifests applied by `kubectl` (and by
+   the provisioner through the API) instead of generated Compose files; provisioning through
+   a `ServiceAccount` with a namespace-scoped `Role` instead of a container that owns the
+   Docker socket; `NetworkPolicy` isolation between hubs and the control services; probes,
+   rolling updates and `rollout undo` for free; and a path to a second node without changing
+   the manifests. The cost is the cluster's own memory (§7), accepted on a 4 GB box.

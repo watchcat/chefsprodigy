@@ -116,24 +116,16 @@ pub struct TranslationInfo { pub lang: String, pub origin: TranslationOrigin, pu
 /// `canonical_label` on every ingredient) plus an optional `translation` member
 pub struct LocalizedRecipe { #[serde(flatten)] pub recipe: Recipe, pub translation: Option<TranslationInfo> }
 
-/// One line of the federation manifest (`GET /api/v1/federation/manifest`). `translations`
-/// carries each stored translation's own timestamp: saving one never changes the recipe's
-/// `updated_at` or `content_hash`, so an aggregator compares `(id, updated_at, content_hash)`
-/// and every `(lang, updated_at)` pair (docs/SPEC-hosted-platform.md §4.4)
-pub struct ManifestEntry { pub id: String, pub updated_at: String, pub content_hash: String, pub translations: Vec<ManifestTranslation> }
-pub struct ManifestTranslation { pub lang: String, pub origin: TranslationOrigin, pub stale: bool, pub updated_at: String }
-
-/// What `GET /api/v1/federation/recipes/{id}` returns: the public `Recipe` (flattened, source
-/// language) plus every stored translation, LLM or human
-pub struct FederatedRecipe { #[serde(flatten)] pub recipe: Recipe, pub translations: Vec<RecipeTranslation> }
+/// One line of the federation manifest (`GET /api/v1/federation/manifest`)
+pub struct ManifestEntry { pub id: String, pub updated_at: String, pub content_hash: String }
+// Planned (RN-64): `translations: Vec<{ lang, origin, stale, updated_at }>` per entry and
+// `translations: Vec<RecipeTranslation>` on `GET /api/v1/federation/recipes/{id}`, so an
+// aggregator notices translations without a recipe change (docs/SPEC-hosted-platform.md §4.4).
 ```
 
 Localized ingredient labels come from `canonical_terms` (`TranslationService::labels`):
 cached per `(canonical_id, lang)`, fetched from the model in batches of up to 100 with a
-humanized id as fallback. A seeded dictionary (`migrations/20261027000001_seed_canonical_terms.sql`,
-RN-75) ships about 230 everyday ids with `en`, `ru` and `nl` labels as `origin = 'human'` rows, so
-basic terms never cost a model call; the upsert in `recipe-db` lets a model label replace only
-`llm` rows, never human ones, and `INSERT OR IGNORE` keeps labels already stored.
+humanized id as fallback; a seeded dictionary of everyday ingredients is planned (RN-75).
 
 ### `content_hash` Calculation Algorithm
 To protect authorship and deduplicate recipes in the Central Aggregator, implement `calculate_content_hash(recipe)`:
@@ -283,15 +275,8 @@ CREATE VIRTUAL TABLE translations_fts USING fts5(
 ## 3. Scraper Pipeline (`crates/recipe-scraper`)
 
 `RecipeImporter` runs the following stages; the cheapest one that yields a recipe wins. Every
-user-supplied URL (page, cover, JSON-LD image) passes the SSRF guard in `recipe-scraper/src/ssrf.rs`
-before it is fetched (RN-74, `docs/SPEC-hosted-platform.md` §6): only `http`/`https`; literal IP
-hosts and every DNS answer for a hostname are refused when they are loopback, RFC 1918, carrier-grade
-NAT, link-local (cloud metadata), unique-local, multicast, unspecified or reserved, with IPv4 embedded
-in IPv6 (mapped, NAT64, 6to4) judged as IPv4. The importer's HTTP client uses the same check as its
-DNS resolver and redirect policy, so every redirect hop is checked again and the connection goes to
-the checked address. Refusals surface as `ScraperError::BlockedUrl` ("refusing to fetch …"), HTTP
-`400` on the API and an invalid-input error on MCP. `RecipeImporter::allow_private_hosts()` exists
-for tests with local stand-in sites and never unlocks link-local or multicast ranges.
+user-supplied URL (page, cover, JSON-LD image) will pass an SSRF guard before it is fetched
+(RN-74, `docs/SPEC-hosted-platform.md` §6).
 
 ### Stage 1: Fast `Schema.org/Recipe` Parsing (Zero-LLM or Micro-Normalization)
 1. Fetch the target URL HTML via `reqwest` using a browser-like `User-Agent`.
