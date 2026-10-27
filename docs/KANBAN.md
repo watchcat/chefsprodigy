@@ -16,10 +16,6 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
-`NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
-- Acceptance: API tests: manifest lists a translation with its own `updated_at` after `PUT /recipes/{id}/translations/ru` without the recipe's `updated_at` changing; federated recipe carries it; public recipes only; allowlist derived from the URL.
-
 ### RN-74 · SSRF guard on user-supplied URL fetches (S)
 Harden `recipe-scraper` (`RecipeImporter::import_url`, `fetch_bytes` for covers and JSON-LD images, used by `ImportService::import_url`): resolve the hostname first and refuse loopback, link-local incl. cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 1918, CGNAT `100.64/10`, `fc00::/7`, multicast/unspecified addresses and any scheme other than `http`/`https`; re-check every redirect hop and connect to the checked address. A builder flag `allow_private_hosts` exists only for tests with local servers. Spec: `docs/SPEC-hosted-platform.md` §6.
 - Acceptance: tests show `http://169.254.169.254/`, `http://127.0.0.1:8080/`, `http://llm-gateway:8080/` and a public URL redirecting to a private address are refused with a clear error; public URLs still import; the model client is unaffected.
@@ -105,6 +101,12 @@ _(empty)_
 
 ## Done
 
+### RN-64 · `NODE_PUBLIC_URL`, manifest `node_url`, translations in federation, SSE headers (S)
+`NODE_PUBLIC_URL` surfaced as `node_url` in `GET /api/v1/federation/manifest`, its host added to the MCP allowlist by default. Manifest entries gain `translations: [{lang, origin, stale, updated_at}]` and `GET /api/v1/federation/recipes/{id}` returns `translations: [RecipeTranslation]`, because saving a translation never changes `updated_at`/`content_hash` and the aggregator must still notice it (spec §4.4, `docs/MCP_AND_API_SPEC.md`). SSE responses on `/mcp` send `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
+- Acceptance: API tests: manifest lists a translation with its own `updated_at` after `PUT /recipes/{id}/translations/ru` without the recipe's `updated_at` changing; federated recipe carries it; public recipes only; allowlist derived from the URL.
+
+- Done 2026-10-27 (re-applied from the rolled-back a02de56 onto the k3s baseline): `NODE_PUBLIC_URL` serve option (validated absolute http(s) URL, trailing slash dropped) published as manifest `node_url` (null when unset); the default `/mcp` allowlist is loopback plus that URL's `host[:port]` (`default_mcp_allowed_hosts_with`), an explicit `NODE_MCP_ALLOWED_HOSTS` still replaces the list. `ManifestEntry.translations: [{lang, origin, stale, updated_at}]` from one join over public recipes; `GET /federation/recipes/{id}` returns `FederatedRecipe` (recipe flat + `translations: [RecipeTranslation]`); private recipes and their translations stay hidden. SSE headers: rmcp 3.6 already sends `Cache-Control: no-cache` and `X-Accel-Buffering: no` on every event stream; a test pins it. 11 tests (DTO shapes, repository queries, manifest keeps the recipe's `updated_at` after a translation and flips `stale` after an edit, federated translations, private exclusion, node_url, allowlist derivation, SSE headers); workspace 199, clippy and rustfmt clean. API spec, architecture doc, README and `.env.example` document the two variables. In the k3s design the hub's `NODE_PUBLIC_URL` comes from its `Secret` and the platform polls `http://hub-<name>.chefs-hubs.svc:8080`.
+
 ### RN-63 · Dockerfile, `healthcheck` subcommand and image publishing (S)
 Per `docs/SPEC-hosted-platform.md` §5.1: multi-stage build, distroless runtime with no shell tools, non-root, `/data` volume; new `node-server healthcheck [--port]` subcommand that does one loopback GET of `/api/v1/health` (2 s timeout, exit 0/1) and is used by `HEALTHCHECK`, so the image needs no `curl`; `TOKIO_WORKER_THREADS=2` set in the image and repeated in the k3s pod template (§5.6), where the kubelet probes `/api/v1/health` over `httpGet`; GitHub Actions publishing `ghcr.io/watchcat/chefsprodigy` on tags.
 - Acceptance: `docker run` reports healthy with no `curl`/`wget` in the image; `node-server healthcheck` exits 1 when nothing listens; image under 30 MB compressed.
@@ -171,6 +173,3 @@ The PWA now has a `#/shopping` builder, linked from the library and primary navi
 ### RN-46 · UI: import from photos (M)
 The import dialog now includes a responsive From photo tab with a camera-capable 1–6 image picker, local thumbnails, size/count feedback, a privacy disclosure, and visible analysis progress. It posts repeated multipart `photos` plus `is_public` to `POST /api/v1/import/photo`, renders errors inline, and opens a created recipe on success.
 - Verified in-browser 2026-10-22 via `scripts/devbuild.sh`: a readable recipe-card JPEG imported through MiniMax-M3 as Lemon Herb Orzo and opened in detail; a logo image returned an inline 422 no-recipe message; an isolated no-model node returned the inline 503 vision-capability message. Browser console had no errors.
-
-### RN-45 · MCP: photo_paths on import_recipe (S)
-`import_recipe` accepts `photo_paths`; unreadable paths are reported in the tool error. End-to-end test over stdio with a fake vision extractor.

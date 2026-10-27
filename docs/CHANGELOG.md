@@ -19,6 +19,9 @@ The PWA now has `#/new` and `#/recipe/{id}/edit` views with accessible create/ed
 Removed the unreferenced 150 KB legacy vector app mark from the embedded bundle. The local PNG icon set remains the sole browser and manifest branding source, and the frontend scope now documents that arrangement.
 - Verified 2026-10-22: the static bundle is 176 KB and a repository-source scan finds no retired asset filename.
 
+### RN-45 · MCP: photo_paths on import_recipe (S)
+`import_recipe` accepts `photo_paths`; unreadable paths are reported in the tool error. End-to-end test over stdio with a fake vision extractor.
+
 ## Archived 2026-10-23
 
 ### RN-20 · Frontend PWA with Cook Mode (L)

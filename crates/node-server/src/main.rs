@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use node_server::mcp::API_KEY_ENV;
-use node_server::state::default_mcp_allowed_hosts;
+use node_server::state::default_mcp_allowed_hosts_with;
 use node_server::{AppState, NodeInfo, build_router};
 use recipe_db::Db;
 use recipe_scraper::{RecipeImporter, extractor_from_env};
@@ -44,9 +44,12 @@ enum Command {
         /// Bearer token protecting the /mcp endpoint (endpoint disabled when unset)
         #[arg(long, env = API_KEY_ENV, hide_env_values = true)]
         api_key: Option<String>,
-        /// Hosts accepted on /mcp (comma separated); defaults to loopback names
+        /// Hosts accepted on /mcp (comma separated); defaults to loopback names plus the host of NODE_PUBLIC_URL
         #[arg(long, env = "NODE_MCP_ALLOWED_HOSTS", value_delimiter = ',')]
         mcp_allowed_hosts: Option<Vec<String>>,
+        /// Public base URL of this node, e.g. https://jacob.example.com (federation `node_url`)
+        #[arg(long, env = "NODE_PUBLIC_URL")]
+        public_url: Option<String>,
     },
     /// Detect and store the source language of recipes that lack one
     BackfillLanguage {
@@ -93,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
             chef_name,
             api_key,
             mcp_allowed_hosts,
+            public_url,
         } => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
             let db = db.unwrap_or_else(|| data_dir.join("recipes.db"));
@@ -105,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
                 chef_name,
                 api_key,
                 mcp_allowed_hosts,
+                public_url,
             })
             .await
         }
@@ -147,6 +152,7 @@ struct ServeOptions {
     chef_name: String,
     api_key: Option<String>,
     mcp_allowed_hosts: Option<Vec<String>>,
+    public_url: Option<String>,
 }
 
 async fn open_state(
@@ -203,6 +209,7 @@ async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
         chef_name,
         api_key,
         mcp_allowed_hosts,
+        public_url,
     } = opts;
     let mut state = open_state(
         &data_dir,
@@ -222,6 +229,19 @@ async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
             "{API_KEY_ENV} not set: running in single-user mode, every caller on the network is the owner (full read/write API access) and /mcp is disabled"
         ),
     }
+    let public_url = public_url
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty());
+    if let Some(url) = &public_url {
+        let parsed = url::Url::parse(url)
+            .with_context(|| format!("NODE_PUBLIC_URL {url:?} is not a valid URL"))?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+            "NODE_PUBLIC_URL {url:?} must be an absolute http(s) URL"
+        );
+        state = state.with_public_url(url);
+        tracing::info!(node_url = %url, "public URL configured");
+    }
     let hosts = mcp_allowed_hosts
         .map(|h| {
             h.into_iter()
@@ -229,7 +249,7 @@ async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_else(default_mcp_allowed_hosts);
+        .unwrap_or_else(|| default_mcp_allowed_hosts_with(public_url.as_deref()));
     state = state.with_mcp_allowed_hosts(hosts);
     // Recipes imported before source languages existed get one in the background.
     let backfill = state.translations();

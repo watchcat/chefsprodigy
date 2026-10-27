@@ -116,11 +116,16 @@ pub struct TranslationInfo { pub lang: String, pub origin: TranslationOrigin, pu
 /// `canonical_label` on every ingredient) plus an optional `translation` member
 pub struct LocalizedRecipe { #[serde(flatten)] pub recipe: Recipe, pub translation: Option<TranslationInfo> }
 
-/// One line of the federation manifest (`GET /api/v1/federation/manifest`)
-pub struct ManifestEntry { pub id: String, pub updated_at: String, pub content_hash: String }
-// Planned (RN-64): `translations: Vec<{ lang, origin, stale, updated_at }>` per entry and
-// `translations: Vec<RecipeTranslation>` on `GET /api/v1/federation/recipes/{id}`, so an
-// aggregator notices translations without a recipe change (docs/SPEC-hosted-platform.md §4.4).
+/// One line of the federation manifest (`GET /api/v1/federation/manifest`). `translations`
+/// carries each stored translation's own timestamp: saving one never changes the recipe's
+/// `updated_at` or `content_hash`, so an aggregator compares `(id, updated_at, content_hash)`
+/// and every `(lang, updated_at)` pair (docs/SPEC-hosted-platform.md §4.4)
+pub struct ManifestEntry { pub id: String, pub updated_at: String, pub content_hash: String, pub translations: Vec<ManifestTranslation> }
+pub struct ManifestTranslation { pub lang: String, pub origin: TranslationOrigin, pub stale: bool, pub updated_at: String }
+
+/// What `GET /api/v1/federation/recipes/{id}` returns: the public `Recipe` (flattened, source
+/// language) plus every stored translation, LLM or human
+pub struct FederatedRecipe { #[serde(flatten)] pub recipe: Recipe, pub translations: Vec<RecipeTranslation> }
 ```
 
 Localized ingredient labels come from `canonical_terms` (`TranslationService::labels`):

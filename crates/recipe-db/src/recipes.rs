@@ -5,8 +5,8 @@
 
 use chrono::{SecondsFormat, Utc};
 use recipe_core::{
-    IngredientItem, InstructionStep, ManifestEntry, Recipe, RecipeInput, RecipeSummary,
-    SearchQuery, new_recipe_id,
+    IngredientItem, InstructionStep, ManifestEntry, ManifestTranslation, Recipe, RecipeInput,
+    RecipeSummary, SearchQuery, new_recipe_id,
 };
 use sqlx::sqlite::Sqlite;
 use sqlx::{FromRow, QueryBuilder, SqliteConnection};
@@ -433,20 +433,56 @@ impl Db {
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
-    /// Public recipes with their hashes, for Central Aggregator delta sync.
+    /// Public recipes with their hashes and translation stamps, for Central
+    /// Aggregator delta sync. A translation is stale when its `source_updated_at`
+    /// no longer matches the recipe's `updated_at`.
     pub async fn public_manifest(&self) -> Result<Vec<ManifestEntry>, DbError> {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT id, updated_at, content_hash FROM recipes WHERE is_public = 1 ORDER BY updated_at DESC, rowid DESC",
         )
         .fetch_all(self.pool())
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, updated_at, content_hash)| ManifestEntry {
-                id,
+        let stamps: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT t.recipe_id, t.lang, t.origin, t.source_updated_at, t.updated_at \
+             FROM recipe_translations t JOIN recipes r ON r.id = t.recipe_id \
+             WHERE r.is_public = 1 ORDER BY t.recipe_id, t.lang",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let mut by_recipe: std::collections::HashMap<
+            String,
+            Vec<(String, String, String, String)>,
+        > = std::collections::HashMap::new();
+        for (recipe_id, lang, origin, source_updated_at, updated_at) in stamps {
+            by_recipe.entry(recipe_id).or_default().push((
+                lang,
+                origin,
+                source_updated_at,
                 updated_at,
-                content_hash,
+            ));
+        }
+        rows.into_iter()
+            .map(|(id, updated_at, content_hash)| {
+                let translations = by_recipe
+                    .remove(&id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(lang, origin, source_updated_at, translated_at)| {
+                        Ok(ManifestTranslation {
+                            lang,
+                            origin: origin.parse()?,
+                            stale: source_updated_at != updated_at,
+                            updated_at: translated_at,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, DbError>>()?;
+                Ok(ManifestEntry {
+                    id,
+                    updated_at,
+                    content_hash,
+                    translations,
+                })
             })
-            .collect())
+            .collect()
     }
 }
