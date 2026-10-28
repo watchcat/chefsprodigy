@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Search public recipes across Chef's Prodigy hubs.">
+  <title>Chef's Prodigy · Find a recipe</title>
+  <link rel="stylesheet" href="/assets/platform.css">
+</head>
+<body>
+  <a class="skip-link" href="#search-results" data-i18n="Skip to search results">Skip to search results</a>
+  <header class="site-header">
+    <div class="page-shell header-inner">
+      <a class="brand" href="/" aria-label="Chef's Prodigy home" data-i18n-attr="aria-label:Chef's Prodigy home">
+        <span class="brand-mark" aria-hidden="true">CP</span>
+        <span>
+          <strong>Chef's Prodigy</strong>
+          <small data-i18n="A shared recipe table">A shared recipe table</small>
+        </span>
+      </a>
+      <label class="language-field" for="platform-language">
+        <span class="visually-hidden" data-i18n="Search language">Search language</span>
+        <select id="platform-language" name="lang" aria-label="Search language" data-i18n-attr="aria-label:Search language">
+          <option value="en">English</option>
+          <option value="ru">Русский</option>
+          <option value="nl">Nederlands</option>
+        </select>
+      </label>
+    </div>
+  </header>
+
+  <main class="page-shell main-content">
+    <section class="search-hero" aria-labelledby="search-title">
+      <p class="eyebrow" data-i18n="PUBLIC RECIPE DISCOVERY">PUBLIC RECIPE DISCOVERY</p>
+      <h1 id="search-title" data-i18n="Search every kitchen">Search every kitchen</h1>
+      <p data-i18n="Find public recipes shared by independent Chef's Prodigy hubs.">Find public recipes shared by independent Chef's Prodigy hubs.</p>
+      <form id="platform-search-form" class="search-form" role="search">
+        <label class="field-label" for="platform-query" data-i18n="What would you like to cook?">What would you like to cook?</label>
+        <div class="search-fields">
+          <input id="platform-query" class="text-input" name="q" type="search" autocomplete="off" placeholder="Soup, pasta, or a family favourite" data-i18n-attr="placeholder:Soup, pasta, or a family favourite">
+          <button class="button button-primary" type="submit" data-i18n="Search recipes">Search recipes</button>
+        </div>
+        <label class="field-label optional-label" for="platform-ingredient"><span data-i18n="Ingredients">Ingredients</span> <span data-i18n="optional">optional</span></label>
+        <input id="platform-ingredient" class="text-input" name="ingredient" type="text" autocomplete="off" placeholder="chickpea, lemon" data-i18n-attr="placeholder:chickpea, lemon" aria-describedby="ingredient-hint">
+        <p id="ingredient-hint" class="field-hint" data-i18n="Use canonical ingredients separated by commas. Every ingredient must be present.">Use canonical ingredients separated by commas. Every ingredient must be present.</p>
+      </form>
+    </section>
+
+    <section class="search-section" aria-labelledby="search-results-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow" data-i18n="FROM THE NETWORK">FROM THE NETWORK</p>
+          <h2 id="search-results-title" data-i18n="Recipe results">Recipe results</h2>
+        </div>
+        <p id="search-result-summary" class="result-summary" aria-live="polite"></p>
+      </div>
+      <div id="platform-results" class="platform-results" role="status" aria-live="polite" aria-busy="true"></div>
+      <nav class="pagination" aria-label="Search result pages" data-i18n-attr="aria-label:Search result pages">
+        <button class="button button-secondary button-compact" id="platform-prev-page" type="button" data-i18n="Previous">Previous</button>
+        <span id="platform-page-status" aria-live="polite"></span>
+        <button class="button button-secondary button-compact" id="platform-next-page" type="button" data-i18n="Next">Next</button>
+      </nav>
+    </section>
+
+    <section class="directory-section" aria-labelledby="hub-directory-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow" data-i18n="MEET THE COOKS">MEET THE COOKS</p>
+          <h2 id="hub-directory-title" data-i18n="Hub directory">Hub directory</h2>
+        </div>
+      </div>
+      <div id="platform-hubs" class="hub-directory" role="status" aria-live="polite" aria-busy="true"></div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="page-shell">
+      <p data-i18n="Every recipe stays with the cook who shared it.">Every recipe stays with the cook who shared it.</p>
+    </div>
+  </footer>
+  <script type="module" src="/assets/platform.js"></script>
+</body>
+</html>

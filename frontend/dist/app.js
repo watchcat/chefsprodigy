@@ -5,6 +5,8 @@
   const PAGE_SIZE = 12;
   const MAX_PHOTO_COUNT = 6;
   const MAX_PHOTO_BYTES = 20 * 1024 * 1024;
+  const PHOTO_PREP_MAX_EDGE = 1600;
+  const PHOTO_PREP_MAX_BYTES = 12 * 1024 * 1024;
   const UI_LANGUAGES = ["en", "ru", "nl"];
   const UI_LANGUAGE_STORAGE_KEY = "ui.lang";
   const main = document.querySelector("#main-content");
@@ -47,6 +49,9 @@
     },
     editorFieldSequence: 0,
     photoPreviewUrls: [],
+    preparedPhotoFiles: null,
+    photoPreparationVersion: 0,
+    photoPreparing: false,
     shopping: {
       recipes: [],
       loading: false,
@@ -1782,6 +1787,9 @@
     const form = document.querySelector("#photo-import-form");
     const input = form?.querySelector("[data-role='photo-picker']");
     if (input instanceof HTMLInputElement) input.value = "";
+    state.photoPreparationVersion += 1;
+    state.preparedPhotoFiles = null;
+    state.photoPreparing = false;
     clearPhotoPreviews();
     const selection = document.querySelector("#photo-selection");
     const summary = document.querySelector("[data-photo-selection-summary]");
@@ -1805,12 +1813,106 @@
     return "";
   }
 
+  function photoOutputName(file) {
+    const name = stringValue(file && file.name, "recipe-photo").replace(/\.[^.]+$/, "");
+    return `${name || "recipe-photo"}.jpg`;
+  }
+
+  function photoCanvasBlob(canvas, quality) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Could not compress this photo.")), "image/jpeg", quality);
+    });
+  }
+
+  async function preparePhotoFile(file) {
+    if (file.size <= PHOTO_PREP_MAX_BYTES) {
+      try {
+        const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+        const largest = Math.max(bitmap.width, bitmap.height);
+        bitmap.close();
+        if (largest <= PHOTO_PREP_MAX_EDGE) return file;
+      } catch {
+        // Fall through to the DOM image decoder, which is supported by more mobile browsers.
+      }
+    }
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    try {
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error("Could not read this photo."));
+        image.src = objectUrl;
+      });
+      const sourceWidth = image.naturalWidth || image.width;
+      const sourceHeight = image.naturalHeight || image.height;
+      if (!sourceWidth || !sourceHeight) throw new Error("Could not read this photo.");
+      const scale = Math.min(1, PHOTO_PREP_MAX_EDGE / Math.max(sourceWidth, sourceHeight));
+      const width = Math.max(1, Math.round(sourceWidth * scale));
+      const height = Math.max(1, Math.round(sourceHeight * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d", { alpha: false }).drawImage(image, 0, 0, width, height);
+      let blob;
+      for (const quality of [0.88, 0.78, 0.68, 0.58]) {
+        blob = await photoCanvasBlob(canvas, quality);
+        if (blob.size <= PHOTO_PREP_MAX_BYTES) break;
+      }
+      return new File([blob], photoOutputName(file), { type: "image/jpeg", lastModified: Date.now() });
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  async function prepareSelectedPhotos(input) {
+    const files = selectedPhotoFiles(input);
+    const form = input.closest("form");
+    const status = form?.querySelector('[data-form-status="photo"]');
+    const submitButton = form?.querySelector("button[type='submit']");
+    const selectionError = photoSelectionError(files);
+    state.photoPreparationVersion += 1;
+    const version = state.photoPreparationVersion;
+    state.preparedPhotoFiles = null;
+    if (selectionError || !files.length || !form || !status || !submitButton) return;
+    state.photoPreparing = true;
+    submitButton.disabled = true;
+    setPhotoImportProgress(form, true, `Preparing ${files.length} photo${files.length === 1 ? "" : "s"} for upload…`);
+    status.textContent = "Resizing large photos to keep this upload under the 100 MB limit…";
+    status.classList.remove("is-success");
+    try {
+      const prepared = [];
+      for (let index = 0; index < files.length; index += 1) {
+        setPhotoImportProgress(form, true, `Preparing photo ${index + 1} of ${files.length}…`);
+        prepared.push(await preparePhotoFile(files[index]));
+      }
+      if (version !== state.photoPreparationVersion) return;
+      state.preparedPhotoFiles = prepared;
+      const total = prepared.reduce((sum, photo) => sum + photo.size, 0);
+      status.textContent = `${files.length} photo${files.length === 1 ? "" : "s"} prepared (${(total / (1024 * 1024)).toFixed(1)} MB total).`;
+      status.classList.add("is-success");
+    } catch (error) {
+      if (version !== state.photoPreparationVersion) return;
+      state.preparedPhotoFiles = null;
+      status.textContent = error.message || "Could not prepare the selected photos.";
+      status.classList.remove("is-success");
+    } finally {
+      if (version === state.photoPreparationVersion) {
+        state.photoPreparing = false;
+        setPhotoImportProgress(form, false);
+        submitButton.disabled = false;
+      }
+    }
+  }
+
   function updatePhotoSelection(input) {
     const files = selectedPhotoFiles(input);
     const selection = document.querySelector("#photo-selection");
     const summary = document.querySelector("[data-photo-selection-summary]");
     const previewList = document.querySelector("[data-photo-preview-list]");
     const status = document.querySelector('[data-form-status="photo"]');
+    state.photoPreparationVersion += 1;
+    state.preparedPhotoFiles = null;
+    state.photoPreparing = false;
     clearPhotoPreviews();
 
     if (!files.length) {
@@ -1844,6 +1946,7 @@
       card.append(create("span", { className: "photo-preview-name", text: stringValue(file.name, "Selected photo") }));
       previewList.append(card);
     });
+    prepareSelectedPhotos(input);
   }
 
   function setPhotoImportProgress(form, active, message = "") {
@@ -2030,10 +2133,16 @@
       status.classList.remove("is-success");
       return;
     }
+    if (state.photoPreparing) {
+      status.textContent = "Your photos are still being prepared. Please wait a moment.";
+      status.classList.remove("is-success");
+      return;
+    }
+    const uploadFiles = state.preparedPhotoFiles || files;
 
     const formData = new FormData(form);
     const upload = new FormData();
-    files.forEach((file) => upload.append("photos", file, file.name || "recipe-photo"));
+    uploadFiles.forEach((file) => upload.append("photos", file, file.name || "recipe-photo"));
     upload.append("is_public", formData.get("isPublic") === "on" ? "true" : "false");
 
     status.textContent = `Analyzing ${files.length} photo${files.length === 1 ? "" : "s"}. This can take up to 20 seconds…`;
@@ -2045,6 +2154,7 @@
       status.textContent = "Recipe imported. Opening it now…";
       status.classList.add("is-success");
       form.reset();
+      state.preparedPhotoFiles = null;
       clearPhotoPreviews();
       const selection = document.querySelector("#photo-selection");
       if (selection) selection.hidden = true;

@@ -4,6 +4,12 @@ Stories moved out of the Kanban `Done` column, newest first. Ids are never reuse
 
 ## Archived 2026-10-28
 
+### RN-52 · Fix editor heading collapsing to one letter per line (S)
+Bug: on `#/recipe/{id}/edit` the title and eyebrow rendered one character per line. The heading grid's cover column was `auto`, so the cover image's 1200 px natural width took the whole row and left the title track at 0 px. Fixed 2026-10-24 with `fit-content(14rem)` for that column and a capped preview width; verified with and without a cover and at 375 px.
+
+### RN-53 · Backend: source language on recipes (S)
+`recipes.language` (migration `20261024000001_i18n.sql`), normalized BCP-47 primary subtag; detected from JSON-LD `inLanguage` / `<html lang>`, LLM drafts (`language` field), photo extraction; exposed on recipes and summaries; settable via create/update.
+
 ### RN-51 · Verify photo import with real photos (S)
 Verified 2026-10-23 with MiniMax-M3: a Marley Spoon card (front with hero photo + back with Dutch text) imports with the full title, 12 ingredients, 6 steps with timers, servings 2, cook 30 min, and the front photo as cover; an English card ("Willow Chicken in Black Bean Sauce") also imported. Fixes found on the way: `classification`/`type` keys for photo kinds, notes mentioning a dish photo promote a text page to cover, equipment filtered from ingredients, nested `times` objects, synthesized title when the card side has no title.
 Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pasta name sometimes misread ("torchiatelle").

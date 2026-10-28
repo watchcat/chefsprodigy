@@ -1,8 +1,9 @@
-const CACHE_NAME = "chefs-prodigy-shell-v17";
+const CACHE_NAME = "chefs-prodigy-shell-v18";
 const APP_SHELL = [
   "/",
   "/index.html",
   "/styles.css",
+  "/tokens.css",
   "/app.js",
   "/manifest.webmanifest",
   "/i18n/en.json",

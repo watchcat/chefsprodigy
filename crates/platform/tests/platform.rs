@@ -388,6 +388,17 @@ async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
     (status, json)
 }
 
+async fn send_raw(
+    app: &Router,
+    req: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, headers, bytes)
+}
+
 fn admin(method: &str, uri: &str, token: Option<&str>, body: Option<Value>) -> Request<Body> {
     let mut req = Request::builder().method(method).uri(uri);
     if let Some(token) = token {
@@ -1196,5 +1207,70 @@ async fn health_answers_ok_and_unknown_paths_are_json_404s() {
     assert_eq!(body["status"], "ok");
     let (status, body) = p.get("/nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].is_string());
+}
+
+#[tokio::test]
+async fn apex_search_page_serves_embedded_assets_without_exposing_admin() {
+    let p = platform(Config::default()).await;
+
+    let (status, headers, body) =
+        send_raw(&p.app, Request::get("/").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let html = String::from_utf8(body).unwrap();
+    assert!(html.contains("Chef's Prodigy"));
+    assert!(html.contains("platform-search-form"));
+
+    for (path, expected_type, marker) in [
+        ("/assets/platform.css", "text/css", "platform-results"),
+        ("/assets/platform.js", "javascript", "loadSearch"),
+        ("/assets/tokens.css", "text/css", "--ink-950"),
+        (
+            "/assets/i18n/en.json",
+            "application/json",
+            "Search every kitchen",
+        ),
+    ] {
+        let (status, headers, body) =
+            send_raw(&p.app, Request::get(path).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(
+            headers[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .contains(expected_type),
+            "{path}: {:?}",
+            headers[header::CONTENT_TYPE]
+        );
+        assert!(String::from_utf8(body).unwrap().contains(marker), "{path}");
+    }
+
+    let (status, headers, _) = send_raw(
+        &p.app,
+        Request::get("/assets/missing.js")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json")
+    );
+
+    let (status, body) = p.get("/admin/hubs").await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "admin stays internal-only"
+    );
     assert!(body["error"].is_string());
 }

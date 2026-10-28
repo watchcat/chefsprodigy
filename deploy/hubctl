@@ -947,9 +947,10 @@ PLATFORM_ENV_KEYS = (
     "PLATFORM_BACKOFF_MAX_SECS", "PLATFORM_HTTP_TIMEOUT_SECS", "RUST_LOG",
 )
 PLATFORM_PLACEHOLDER = "<copied from .env by hubctl init>"
-# The apex Ingress routes only the public API; /admin stays inside the cluster (hubctl
-# uses the CLI through kubectl exec). RN-70 adds the search page at /.
-PLATFORM_PUBLIC_PATHS = (("/api/v1/search", "Prefix"), ("/api/v1/hubs", "Prefix"), ("/health", "Exact"))
+# The apex Ingress routes the public API plus the explicit search shell and static-prefix
+# assets. `/` remains Exact so `/admin` stays inside the cluster (hubctl uses the CLI through
+# kubectl exec) instead of accidentally receiving a broad public Prefix route.
+PLATFORM_PUBLIC_PATHS = (("/", "Exact"), ("/assets", "Prefix"), ("/api/v1/search", "Prefix"), ("/api/v1/hubs", "Prefix"), ("/health", "Exact"))
 
 
 def hub_internal_url(name: str) -> str:

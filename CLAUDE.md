@@ -54,6 +54,7 @@ Always use these commands to verify your changes:
 - **Strict Linter:** `cargo clippy --workspace --all-targets -- -D warnings`
 - **Formatting:** `cargo fmt --all -- --check` (rustfmt defaults, no config file); fix with `cargo fmt --all`.
 - **Run tests:** `cargo test --workspace`
+- **Frontend tests:** `node --check frontend/dist/app.js`, `node --test frontend/tests/*.test.mjs` (search helpers, offline app shell) and `python3 -I scripts/i18n-check.py` (hub and apex bundles).
 - **Run node as HTTP server:** `cargo run -p node-server -- serve --port 8080`
 - **Run node in local MCP (stdio) mode:** `cargo run -p node-server -- mcp-stdio`
 - **Run the LLM gateway:** `cargo run -p llm-gateway -- serve --port 8090` (vendor keys and `GATEWAY_ADMIN_TOKEN` from the environment; `llm-gateway add-hub <name>` prints a hub token). A hub uses it by setting `MINIMAX_ANTHROPIC_API_BASE=http://<gateway>/anthropic` and `MINIMAX_API_KEY=<hub token>` (for Anthropic models `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`). On k3s `hubctl` runs it as `deploy/llm-gateway` in `chefs-system` and drives `add-hub --rotate --json`, `disable-hub` and `usage` through `kubectl exec`.

@@ -395,9 +395,14 @@ canonical ids that must all be present; without `q` it lists newest first; `limi
 best-matching row and `matched_lang` names its language. The manifest's `chef_name` fills the
 directory when the operator gave none. hubctl deploys it in `init`, registers hubs in `create`,
 removes them in `remove` and upgrades it after the gateway; the apex `Ingress` routes only
-`/api/v1/search`, `/api/v1/hubs` and `/health`. Not in v1: the push endpoint, the search page
-(RN-70), the outbox (RN-71) and signup (RN-73); `platform.db` is not backed up (the index
-refills from the hubs; the registry from `hubctl create`).
+the exact `GET /` search shell, its `/assets` prefix, `/api/v1/search`, `/api/v1/hubs` and
+`/health`. RN-70 embeds the dependency-free `frontend/platform` page plus the canonical
+`frontend/dist/tokens.css` with `rust-embed`; the hub imports that same token file, so both
+binaries retain an embedded copy without duplicating a visual-token source. The page keeps
+search state in the query string, safely renders public hub results and directory entries, and
+localizes static UI strings from en/ru/nl bundles. The Ingress never uses a Prefix route for `/`,
+so `/admin` stays internal. Not in v1: the push endpoint, the outbox (RN-71) and signup (RN-73);
+`platform.db` is not backed up (the index refills from the hubs; the registry from `hubctl create`).
 
 Public API and pages:
 - `GET /` landing and search page (dependency-free UI like the hub's, same design tokens

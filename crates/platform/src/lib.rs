@@ -20,6 +20,7 @@ pub mod index;
 pub mod poller;
 pub mod search;
 pub mod state;
+pub mod ui;
 
 use axum::body::Body;
 use axum::http::Request;
@@ -37,6 +38,8 @@ pub use state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(ui::serve_embedded))
+        .route("/assets/{*path}", get(ui::serve_embedded))
         .route("/health", get(health))
         .merge(api::router())
         .merge(admin::router())

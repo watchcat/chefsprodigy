@@ -582,7 +582,7 @@ class Platform(HubctlCase):
     def platform_state(self):
         return self.raw_state().get("_platform", {"hubs": {}})
 
-    def test_init_deploys_the_platform_with_an_apex_ingress_for_the_public_api_only(self):
+    def test_init_deploys_the_platform_with_an_apex_ingress_for_the_search_page_and_public_api(self):
         code, out = self.run_hubctl("init")
         self.assertEqual(code, 0, out)
         self.assertIn("platform", out)
@@ -618,8 +618,15 @@ class Platform(HubctlCase):
         rule = ingress["spec"]["rules"][0]
         self.assertEqual(rule["host"], "example.test", "the apex")
         paths = {p["path"]: p["pathType"] for p in rule["http"]["paths"]}
-        self.assertEqual(paths, {"/api/v1/search": "Prefix", "/api/v1/hubs": "Prefix", "/health": "Exact"})
-        self.assertFalse(any(p.startswith("/admin") or p == "/" for p in paths), "/admin never reaches the internet")
+        self.assertEqual(paths, {
+            "/": "Exact",
+            "/assets": "Prefix",
+            "/api/v1/search": "Prefix",
+            "/api/v1/hubs": "Prefix",
+            "/health": "Exact",
+        })
+        self.assertEqual(paths["/"], "Exact", "the search page must not make every platform path public")
+        self.assertFalse(any(p.startswith("/admin") for p in paths), "/admin never reaches the internet")
         annotations = ingress["metadata"]["annotations"]
         self.assertEqual(annotations["traefik.ingress.kubernetes.io/router.entrypoints"], "web", "TLS_MODE=off")
         self.assertEqual(annotations["traefik.ingress.kubernetes.io/router.middlewares"], "chefs-system-headers@kubernetescrd")

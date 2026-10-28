@@ -16,17 +16,9 @@ in one sitting and always name the acceptance check.
 
 ## Backlog
 
-### RN-70 · platform search page on the apex (M)
-Dependency-free UI reusing the hub's design tokens: search, hub directory, links to hubs.
-- Acceptance: a search in `ru` finds a Dutch recipe through its translation when the hub exposes it; works at 375 px.
-
 ### RN-71 · Mail outbox and Resend adapter (S)
 Outbox table, sender loop with backoff, suppression list, provider trait with a Resend implementation and a fake for tests.
 - Acceptance: retries and suppression covered by tests with the fake provider.
-
-### RN-72 · UI: client-side photo downscale before upload (S)
-Resize photos to 1600 px in the browser before `POST /import/photo` so multi-photo imports stay under Cloudflare's 100 MB body cap.
-- Acceptance: six 12 MP photos upload under 100 MB total; server result unchanged.
 
 ### RN-73 · Signup, magic-link owner login, kube-rs provisioner, BYOK (L)
 Spec §4.6 and §5.4. Hub: `GET /api/v1/auth/magic?token=<expires>.<nonce>.<mac>` (HMAC-SHA256 over `NODE_API_KEY`, 10-minute validity, single use, sets `node_session`, redirects to `/#/`) and owner-only `POST /api/v1/auth/magic-link`; `hubctl login-link`. Platform: accounts, email verification via the outbox, subdomain choice, "email me a sign-in link" for existing owners, hub-owner model keys stored in the gateway. Provisioner: a `kube-rs` service in `chefs-system` whose `ServiceAccount` is bound to a `Role` limited to `StatefulSets`, `Secrets`, `Services`, `Ingresses` and PVCs in `chefs-hubs` (no Docker socket anywhere), exposing `create/remove/rotate-key/login-link` to the platform only. `NODE_API_KEY` stays the master secret and is never rotated for login.
@@ -72,6 +64,20 @@ _(empty)_
 ---
 
 ## Done
+
+### RN-70 · platform search page on the apex (M)
+Dependency-free UI reusing the hub's design tokens: search, hub directory, links to hubs.
+- Acceptance: a search in `ru` finds a Dutch recipe through its translation when the hub exposes it; works at 375 px.
+
+
+- Done 2026-10-28 (k3s edition): the platform serves a dependency-free search page at `/` from `frontend/platform` (embedded with rust-embed): free-text search, an optional ingredient filter, an en/ru/nl language picker that also sets the search `lang`, result cards (cover, tags, hub, "also at" links for forks, a hint when the wording is a translation), paging and a hub directory, with the search kept in the query string. Hub data is rendered as text nodes only, and links and images must be http(s). The hub and the page share one token file, `frontend/dist/tokens.css`: the hub's stylesheet imports it and its service worker precaches it (review found it missing from the offline shell, which would have unstyled the installed app offline; fixed with a regression test). The apex Ingress adds only an Exact `/` and a Prefix `/assets`, so `/admin` stays unrouted. Evidence: in a browser at 375 px against a loopback hub and platform, `?q=гороховый&lang=ru` showed "Гороховый суп" with the translation hint, no horizontal overflow and no console errors; the desktop layout was checked too. k3d, fresh cluster, 23 of 23 checks: `/` (also with a query string) served the page as text/html through Traefik, the five assets came with the right content types (the module script as JavaScript), the security headers were present, the Russian search returned the Dutch recipe's translation linking to the hub, and `/admin/hubs`, `/admin/poll` (GET and POST), `/index.html` and `/foo` answered 404 from Traefik. Tests: a platform embedded-asset test, the hubctl Ingress test, 3 Node search-helper tests and 2 offline-shell tests; workspace 287, deploy 51, i18n hub 196 and apex 43 keys. Open: the Russian hint reads "Показано на языке русский" (should be "Показано на русском языке"); the results region announces every card to screen readers.
+
+### RN-72 · UI: client-side photo downscale before upload (S)
+Resize photos to 1600 px in the browser before `POST /import/photo` so multi-photo imports stay under Cloudflare's 100 MB body cap.
+- Acceptance: six 12 MP photos upload under 100 MB total; server result unchanged.
+
+
+- Done 2026-10-28: the hub's photo import prepares photos in the browser before `POST /api/v1/import/photo`. A photo whose longest side exceeds 1600 px, or that is larger than 12 MB, is redrawn at 1600 px and re-encoded as JPEG (quality 0.88, stepping down only while still over 12 MB); smaller photos are sent unchanged. Submit is disabled while preparing, and the status shows the prepared total. The endpoint, the `photos` fields and the 128 MB server limit are unchanged, so the server's own normalization (EXIF orientation, 1600 px cap, JPEG quality 85) receives photos of the same size as before. Evidence in the real hub UI: six generated 4000×3000 photos of 5.0 MB each (30 MB in total) were prepared in 0.9 s, the multipart request measured 2.20 MB, and every uploaded photo was 1600×1200. Open: the new status messages are English, like the other import messages; the 20 MB per-photo check still runs on the originals; a photo the browser cannot decode (HEIC outside Safari) shows an error, and submitting then uploads the originals.
 
 ### RN-69 · platform v1: registry, poller, index, search API (M)
 New crate per spec §5.3 without mail and signup: hub registry (`internal_url` = `http://hub-<name>.chefs-hubs.svc:8080`), federation poller with backoff comparing `(updated_at, content_hash)` and each translation's `(lang, updated_at)`, `recipes_index` + `translations_index`, FTS with one row per `(hub, recipe, lang)` so translated titles and tags are searchable, fork grouping by content hash, `GET /api/v1/search?lang=` returning the matched language's title/tags and `matched_lang`.
@@ -163,9 +169,3 @@ The embedded PWA now ships parity-checked `en`, `ru`, and `nl` message bundles, 
 
 ### RN-54 · Backend: translation store and service (M)
 `recipe_translations` + `translations_fts` (triggers) + `canonical_terms` tables; `TranslationService` translates lazily on `GET /recipes/{id}?lang=` (or `Accept-Language`), caches per language, coalesces concurrent requests, regenerates stale machine translations, keeps human ones (`PUT/DELETE /recipes/{id}/translations/{lang}`), validates reply lengths and falls back to the source on failure. `GET /i18n/languages`. 20 new tests.
-
-### RN-53 · Backend: source language on recipes (S)
-`recipes.language` (migration `20261024000001_i18n.sql`), normalized BCP-47 primary subtag; detected from JSON-LD `inLanguage` / `<html lang>`, LLM drafts (`language` field), photo extraction; exposed on recipes and summaries; settable via create/update.
-
-### RN-52 · Fix editor heading collapsing to one letter per line (S)
-Bug: on `#/recipe/{id}/edit` the title and eyebrow rendered one character per line. The heading grid's cover column was `auto`, so the cover image's 1200 px natural width took the whole row and left the title track at 0 px. Fixed 2026-10-24 with `fit-content(14rem)` for that column and a capped preview width; verified with and without a cover and at 375 px.

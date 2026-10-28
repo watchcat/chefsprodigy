@@ -104,9 +104,11 @@ The second call should answer `200` with `Content-Type: text/event-stream` and a
 
 **Search on the apex.** `init` also deploys the `platform` (`/usr/local/bin/platform serve`
 from the hub image, 128Mi limit, `platform.db` on a 1Gi volume) with an `Ingress` for the
-bare `DOMAIN` that routes only `/api/v1/search`, `/api/v1/hubs` and `/health`; `/admin` never
-leaves the cluster, and stays off entirely unless `.env` sets `PLATFORM_ADMIN_TOKEN`. `create`
-registers the hub through `kubectl exec deploy/platform -- platform add-hub <name>
+bare `DOMAIN`. Its public search page is the exact `/` path and its static files are under
+`/assets`; the other public paths are `/api/v1/search`, `/api/v1/hubs` and `/health`. The root
+is deliberately an Exact route rather than a Prefix, so `/admin` never leaves the cluster and
+stays off entirely unless `.env` sets `PLATFORM_ADMIN_TOKEN`. `create` registers the hub through
+`kubectl exec deploy/platform -- platform add-hub <name>
 --internal-url http://hub-<name>.chefs-hubs.svc:8080 --public-url <public URL> --chef <chef>`
 (idempotent; running `create` again updates the entry) and `remove` runs `platform remove-hub`,
 which drops the hub's index rows. The platform pods carry `role=hub-client`, so the hub

@@ -143,6 +143,20 @@ spec:
     - host: chefslegacy.com
       http:
         paths:
+          - path: /
+            pathType: Exact
+            backend:
+              service:
+                name: platform
+                port:
+                  number: 8080
+          - path: /assets
+            pathType: Prefix
+            backend:
+              service:
+                name: platform
+                port:
+                  number: 8080
           - path: /api/v1/search
             pathType: Prefix
             backend:
