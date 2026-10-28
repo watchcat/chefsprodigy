@@ -3,8 +3,7 @@
 use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use recipe_core::{FederatedRecipe, ManifestEntry};
-use serde::Serialize;
+use recipe_core::{FederatedRecipe, FederationManifest};
 
 use crate::{ApiError, AppState};
 
@@ -14,19 +13,11 @@ pub fn router() -> Router<AppState> {
         .route("/federation/recipes/{id}", get(public_recipe))
 }
 
-/// Node metadata plus the public recipe index for delta sync.
-#[derive(Debug, Serialize)]
-pub struct Manifest {
-    pub author_did: Option<String>,
-    pub chef_name: String,
-    /// Public base URL of this node (`NODE_PUBLIC_URL`), if configured
-    pub node_url: Option<String>,
-    pub recipes: Vec<ManifestEntry>,
-}
-
-async fn manifest(State(state): State<AppState>) -> Result<Json<Manifest>, ApiError> {
+/// Node metadata plus the public recipe index for delta sync; the platform's
+/// poller deserializes the same `recipe_core::FederationManifest`.
+async fn manifest(State(state): State<AppState>) -> Result<Json<FederationManifest>, ApiError> {
     let node = state.node();
-    Ok(Json(Manifest {
+    Ok(Json(FederationManifest {
         author_did: node.author_did.clone(),
         chef_name: node.chef_name.clone(),
         node_url: state.public_url().map(str::to_string),

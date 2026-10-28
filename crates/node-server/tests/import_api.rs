@@ -220,6 +220,81 @@ async fn import_text_without_llm_returns_503_json() {
     assert!(body["error"].as_str().unwrap().contains("LLM_MODEL"));
 }
 
+/// Stands in for a model endpoint (gateway or vendor) that refuses every call for quota reasons.
+struct QuotaExhausted;
+
+fn quota_refusal() -> ScraperError {
+    ScraperError::ModelQuotaExceeded(
+        "the model quota for this node is used up (daily quota of 10 requests used)".into(),
+    )
+}
+
+impl RecipeExtractor for QuotaExhausted {
+    fn normalize_ingredients<'a>(
+        &'a self,
+        _raw: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<IngredientItem>, ScraperError>> + Send + 'a>> {
+        Box::pin(async { Err(quota_refusal()) })
+    }
+
+    fn extract_recipe<'a>(
+        &'a self,
+        _markdown: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<ExtractedRecipeDraft, ScraperError>> + Send + 'a>> {
+        Box::pin(async { Err(quota_refusal()) })
+    }
+}
+
+#[tokio::test]
+async fn import_text_reports_model_quota_exhaustion_as_429_with_a_code() {
+    let (app, _) = app_with(Arc::new(QuotaExhausted)).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/text",
+        Some(json!({"text": "Fry two eggs"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "model_quota_exceeded");
+    let message = body["error"].as_str().unwrap();
+    assert!(message.contains("quota"), "{message}");
+    assert!(
+        message.contains("daily quota of 10 requests used"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn import_url_keeps_jsonld_imports_working_when_the_model_quota_is_used_up() {
+    let (app, _) = app_with(Arc::new(QuotaExhausted)).await;
+    let base = fake_site().await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/url",
+        Some(json!({"url": format!("{base}/pho")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["title"], "Site Pho");
+    assert_eq!(
+        body["ingredients"][0]["canonical_id"], "star_anise",
+        "normalized locally while the model refuses"
+    );
+
+    // A page without JSON-LD needs the model, so it reports the quota.
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/import/url",
+        Some(json!({"url": format!("{base}/plain")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "model_quota_exceeded");
+}
+
 #[tokio::test]
 async fn import_text_rejects_blank_and_malformed_bodies() {
     let (app, _) = app_with(Arc::new(FakeLlm)).await;

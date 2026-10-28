@@ -3,11 +3,12 @@
 `deploy/` runs many Chef's Prodigy hubs on a single VPS: k3s (Kubernetes with Traefik,
 CoreDNS, local-path storage and network policies built in), Cloudflare in front for DNS,
 TLS and the WAF, one `StatefulSet` per hub, the `llm-gateway` that holds the model vendor
-keys and gives each hub its own token, nightly backups to R2 and a Python tool,
+keys and gives each hub its own token, the `platform` that indexes every hub's public
+recipes for one search on the apex, nightly backups to R2 and a Python tool,
 `hubctl`, that drives `kubectl`. Design and rationale: [docs/SPEC-hosted-platform.md](../docs/SPEC-hosted-platform.md).
 
 ```
-hubctl init                 namespaces, network policies, Traefik config, backup CronJob, llm-gateway
+hubctl init                 namespaces, network policies, Traefik config, backup CronJob, llm-gateway, platform
 hubctl create jacob         Secret + StatefulSet + Service + Ingress + 2Gi volume; prints the owner key once
 hubctl list | status        hubs, URLs, pod state
 hubctl login-link jacob     10-minute magic sign-in link for the owner
@@ -101,6 +102,29 @@ curl -sS -D - -o /dev/null https://jacob.chefslegacy.com/mcp \
 The second call should answer `200` with `Content-Type: text/event-stream` and an
 `Mcp-Session-Id` header: MCP streams through Cloudflare and Traefik.
 
+**Search on the apex.** `init` also deploys the `platform` (`/usr/local/bin/platform serve`
+from the hub image, 128Mi limit, `platform.db` on a 1Gi volume) with an `Ingress` for the
+bare `DOMAIN` that routes only `/api/v1/search`, `/api/v1/hubs` and `/health`; `/admin` never
+leaves the cluster, and stays off entirely unless `.env` sets `PLATFORM_ADMIN_TOKEN`. `create`
+registers the hub through `kubectl exec deploy/platform -- platform add-hub <name>
+--internal-url http://hub-<name>.chefs-hubs.svc:8080 --public-url <public URL> --chef <chef>`
+(idempotent; running `create` again updates the entry) and `remove` runs `platform remove-hub`,
+which drops the hub's index rows. The platform pods carry `role=hub-client`, so the hub
+`NetworkPolicy` lets the poller in. Every 10 minutes (plus jitter) it reads each hub's
+federation manifest and fetches only recipes whose `updated_at`/`content_hash` or translation
+timestamps changed; unpublished recipes and removed translations leave the index on the next
+poll, and a failing hub is retried with exponential backoff. To index right away and check:
+
+```sh
+kubectl -n chefs-system exec deploy/platform -- platform poll          # one pass now, one line per hub
+kubectl -n chefs-system exec deploy/platform -- platform hubs          # last poll, last error, recipe count
+curl 'https://chefslegacy.com/api/v1/search?q=soup&lang=ru'            # hits with matched_lang and also_at
+```
+
+`platform.db` is rebuilt from the hubs and is not in the nightly backup; after losing it,
+`hubctl create <name>` for each hub registers it again and the next poll refills the index.
+`upgrade all` moves the platform to the new `HUB_IMAGE` after the gateway, before the hubs.
+
 **Model access.** The vendor keys from `.env` (`MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`) go only
 into the gateway's Secret `llm-gateway-env` in `chefs-system`. The gateway is a `Deployment`
 of the hub image (`/usr/local/bin/llm-gateway serve`, 64Mi limit) with `gateway.db` on its own
@@ -119,7 +143,79 @@ hubctl usage jacob --from 2026-11-01
 
 Running `hubctl create` again on a hub that was created with direct vendor access moves it
 onto the gateway. `LLM_GATEWAY=off` (or no vendor key) skips the gateway and copies the
-model settings into each hub as before. Quotas and the response cache come with RN-68.
+model settings into each hub as before. Quotas, prices, BYOK and the reply cache are
+covered next.
+
+### Quotas, prices, BYOK and the reply cache
+
+Every hub starts on the free tier (spec section 11): 30 model requests per UTC day during
+its first 3 days at the gateway, then 10 per day, and at most 150 requests or 100 cents of
+estimated cost per calendar month. Over quota the gateway answers `429` with
+`{"type":"error","error":{"type":"quota_exceeded","message":…}}` before it calls the vendor,
+and the hub shows that the model quota is used up (RN-67). Daily limits reset at 00:00 UTC,
+monthly ones on the 1st; only vendor calls count (`hubctl usage`), cache hits are free.
+
+The limits are per-hub settings in the gateway's admin API. Put `GATEWAY_ADMIN_TOKEN` (and,
+for BYOK, `GATEWAY_MASTER_KEY`) in `.env` and run `hubctl init`, which restarts the gateway
+with the new Secret. The admin API has no Ingress; reach it through a port-forward, which
+goes through the API server and the kubelet, so the policy that admits only hub pods does not
+apply:
+
+```sh
+kubectl -n chefs-system port-forward deploy/llm-gateway 8090:8080 &
+TOKEN=$(sed -n 's/^GATEWAY_ADMIN_TOKEN=//p' /srv/chefslegacy/.env)
+gw() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; echo; }
+gw http://127.0.0.1:8090/admin/hubs                    # quota, status and byok_vendors per hub
+gw -X PATCH http://127.0.0.1:8090/admin/hubs/jacob -d '{"daily_request_limit": 50, "monthly_request_limit": 1000}'
+gw -X PATCH http://127.0.0.1:8090/admin/hubs/jacob -d '{"onboarding_days": 0}'     # end the onboarding tier
+gw -X PATCH http://127.0.0.1:8090/admin/hubs/jacob -d '{"status": "disabled"}'     # "active" restores the same token
+kill %1                                                # close the port-forward
+```
+
+`PATCH` takes any of `onboarding_daily_requests`, `onboarding_days`, `daily_request_limit`,
+`daily_token_limit` (input plus output tokens a day, the vendor's prompt-cache tokens
+included; `0` removes this cap), `monthly_request_limit`, `monthly_cost_cap_cents` and
+`status`; unknown fields and negative numbers are refused, and the answer shows the hub as
+stored. During the onboarding days `onboarding_daily_requests` applies instead of
+`daily_request_limit`. Any other limit set to `0` blocks the hub's model calls. `hubctl remove` and
+`hubctl gateway-token` keep the limits and the onboarding start; `DELETE
+/admin/hubs/<name>` forgets the hub and its usage.
+
+**Prices.** The monthly cost cap needs a price, in cents per million tokens, for each model
+name the hubs send (`MiniMax-M3` for `LLM_MODEL=minimax/MiniMax-M3`). Without one a call is
+estimated at 0 cents and only the request limits apply. The figures below are placeholders;
+take them from the vendor's price list. Prompt-cache reads are priced at the full input rate,
+so the estimate is an upper bound.
+
+```sh
+gw -X PUT http://127.0.0.1:8090/admin/prices \
+  -d '{"vendor": "minimax", "model": "MiniMax-M3", "input_cents_per_mtok": 30, "output_cents_per_mtok": 120}'
+gw http://127.0.0.1:8090/admin/prices
+```
+
+**Bring your own key.** With `GATEWAY_MASTER_KEY` set, a hub owner's own vendor key can be
+stored for that hub; the hub then calls the vendor with it, skips the platform limits and
+still has its usage recorded. The key is encrypted (XChaCha20-Poly1305) in `gateway.db` and
+never shown again; the listing names only the vendors. Read it without echoing it so it stays
+out of the shell history:
+
+```sh
+read -rs OWNER_KEY
+gw -X POST http://127.0.0.1:8090/admin/hubs/jacob/byok -d "{\"vendor\": \"minimax\", \"key\": \"$OWNER_KEY\"}"
+gw -X DELETE http://127.0.0.1:8090/admin/hubs/jacob/byok/minimax       # back to the platform key and quota
+```
+
+Keys stored under an earlier `GATEWAY_MASTER_KEY` no longer decrypt: those hubs fall back to
+the platform key and quota (the gateway log says so), and storing a new key answers `409`
+until the old ones are removed with the `DELETE` above.
+
+**Reply cache.** Requests with `temperature` 0 (the hubs send every import, translation and
+label request that way) are answered from the cache when vendor, model and request content
+match, across hubs and regardless of JSON key order. Only successful replies up to 1 MB are
+kept, for `GATEWAY_CACHE_TTL_DAYS` (30), at most `GATEWAY_CACHE_MAX_ENTRIES` (10000) of them,
+the least recently hit evicted first. Every reply carries `x-gateway-cache: hit`, `miss` or
+`bypass`; `gw http://127.0.0.1:8090/admin/cache/stats` shows entries, bytes and hits. The
+cache lives in `gateway.db` on the gateway's volume.
 
 ## 4. Day to day
 
@@ -203,7 +299,7 @@ remove behave as described.
   profile, no service-account token, 50m/32Mi requested and 500m/128Mi limits,
   `TOKIO_WORKER_THREADS=2`, `/data` on its own volume and `/tmp` on an emptyDir.
 - Accepts connections only from Traefik and from `role=hub-client` pods in `chefs-system`
-  (the backup job, later the platform poller).
+  (the backup job and the platform poller).
 - Opens connections only to cluster DNS, to public addresses (private ranges, the node and
   the Kubernetes API are excluded) and to `llm-gateway` in `chefs-system`. The hub's own
   SSRF guard refuses private destinations as a second line.
@@ -222,3 +318,4 @@ remove behave as described.
 | Backup job fails | `hubctl backup all` prints the log; `kubectl -n chefs-system get jobs` lists past runs |
 | Hub cannot call the model | `kubectl -n chefs-hubs logs hub-<name>-0`; then `kubectl -n chefs-system logs deploy/llm-gateway`. A 401 there means the hub's token is unknown: `hubctl gateway-token <name>` |
 | `create` stops at *llm-gateway is not ready* | `kubectl -n chefs-system describe pod -l app=llm-gateway`; the gateway needs its volume and the hub image |
+| A hub reports that its model quota is used up | `hubctl usage <name>` shows today's and this month's requests; raise the hub's limits or store its own key (section 3, *Quotas, prices, BYOK and the reply cache*) |

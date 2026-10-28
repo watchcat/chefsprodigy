@@ -414,3 +414,21 @@ pub struct FederatedRecipe {
     #[serde(default)]
     pub translations: Vec<RecipeTranslation>,
 }
+
+/// The federation manifest a node serves at `GET /api/v1/federation/manifest`:
+/// node metadata plus the public recipe index an aggregator uses for delta sync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FederationManifest {
+    /// Decentralized identifier of the node owner, if configured
+    #[serde(default)]
+    pub author_did: Option<String>,
+    /// Display name of the chef running the node
+    #[serde(default)]
+    pub chef_name: String,
+    /// Public base URL of this node (`NODE_PUBLIC_URL`), if configured
+    #[serde(default)]
+    pub node_url: Option<String>,
+    /// Every public recipe with its timestamps, content hash and translations
+    #[serde(default)]
+    pub recipes: Vec<ManifestEntry>,
+}

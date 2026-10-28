@@ -12,6 +12,7 @@ from `hubctl init` (namespaces, network policies, Traefik config, backup CronJob
 | `network-policies.yaml` | default deny in `chefs-hubs`; hubs accept Traefik (`kube-system`) and `role=hub-client` pods in `chefs-system`; hubs reach DNS, public addresses and `llm-gateway` only |
 | `traefik-config.yaml` | `HelmChartConfig traefik` (Cloudflare trusted IPs, http→https redirect, access logs off), `Middleware headers`, `TLSStore default` → `Secret chefs-origin-tls` |
 | `backup-cronjob.yaml` | `ServiceAccount hub-backup`, `Role`/`RoleBinding` to read hub Secrets, the fetch/upload scripts, `CronJob hub-backup` (rclone → R2) |
+| `platform.yaml` | `Secret platform-env` (admin token placeholder), `PVC platform-data`, `Deployment platform` (pods labelled `role=hub-client` for the poller), `Service`, apex `Ingress` for `chefslegacy.com` routing only `/api/v1/search`, `/api/v1/hubs` and `/health`, `NetworkPolicy platform-ingress` (Traefik only) |
 | `hub.example.yaml` | what `hubctl render jacob` prints before the hub exists: placeholder key, `https://jacob.chefslegacy.com` |
 
 Edit `deploy/hubctl`, not these files, then regenerate them; `deploy/tests` fails when the

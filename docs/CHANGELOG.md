@@ -4,6 +4,19 @@ Stories moved out of the Kanban `Done` column, newest first. Ids are never reuse
 
 ## Archived 2026-10-28
 
+### RN-51 · Verify photo import with real photos (S)
+Verified 2026-10-23 with MiniMax-M3: a Marley Spoon card (front with hero photo + back with Dutch text) imports with the full title, 12 ingredients, 6 steps with timers, servings 2, cook 30 min, and the front photo as cover; an English card ("Willow Chicken in Black Bean Sauce") also imported. Fixes found on the way: `classification`/`type` keys for photo kinds, notes mentioning a dish photo promote a text page to cover, equipment filtered from ingredients, nested `times` objects, synthesized title when the card side has no title.
+Known limits: covers are lossless WebP (~1.2 MB for a card front, see RN-21); pasta name sometimes misread ("torchiatelle").
+
+### RN-49 · Navbar logo and PWA icons (S)
+PNG mark at 128/192/512 px plus Apple touch icon; favicon, manifest icons and service-worker shell updated.
+
+### RN-48 · MiniMax-M3 default and lenient model-reply parsing (M)
+`LLM_MODEL=minimax/MiniMax-M3` via `.env`; rig reads vendor variables unless `LLM_API_KEY` overrides. Replies with missing/renamed fields, string ranges, time phrases, decimal commas and unit spellings now parse; gateway errors and rejected replies are logged.
+
+### RN-47 · Dev tooling: devbuild.sh, .env, per-toolchain target dirs (S)
+`scripts/devbuild.sh` builds, runs, seeds and opens the browser; loads `.env` (template `.env.example`, git-ignored); uses `target/rustc-<version>/` per toolchain and refuses a stale `DEVELOPER_DIR`.
+
 ### RN-50 · Kanban tooling (S)
 `scripts/kanban.py serve` (drag-and-drop board writing back to this file, replaces stale instances) and `render` (static `docs/kanban.html`).
 

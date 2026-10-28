@@ -80,6 +80,8 @@ rows are regenerated on next request; stale `human` rows are kept and reported a
 
 `translate_terms(canonical_ids, lang)` batches up to 100 ids per call into
 `canonical_terms`; missing labels fall back to the id with underscores replaced by spaces.
+Everyday ids come pre-seeded in `en`, `ru` and `nl` as `origin = 'human'` rows (RN-75), which a
+model label never overwrites.
 
 Without `LLM_MODEL`, translation requests answer with the source language and
 `"translation": null`; nothing errors.

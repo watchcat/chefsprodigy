@@ -3,7 +3,8 @@
 file (FAKE_KUBE_STATE), logs every invocation (FAKE_LOG) and answers the handful
 of read commands hubctl uses. Pods are synthesized from stored StatefulSets and
 Deployments; `exec deploy/llm-gateway -- llm-gateway …` emulates the gateway CLI
-with hub tokens and usage rows kept under the state's "_gateway" key.
+with hub tokens and usage rows kept under the state's "_gateway" key, and
+`exec deploy/platform -- platform …` the platform's registry under "_platform".
 """
 
 import json
@@ -113,6 +114,39 @@ def gateway_cli(state, args):
         print(json.dumps(sorted(rows, key=lambda r: (r["day"], r["hub"]), reverse=True), indent=2))
         return 0
     print(f"fake llm-gateway: unsupported {args}", file=sys.stderr)
+    return 2
+
+
+def platform_cli(state, args):
+    """The platform subcommands hubctl runs through `kubectl exec`; the registry lives under
+    the state's "_platform" key."""
+    pf = state.setdefault("_platform", {"hubs": {}})
+    sub, rest = args[0], args[1:]
+    name = rest[0] if rest and not rest[0].startswith("-") else None
+    if sub == "add-hub":
+        hub = pf["hubs"].get(name)
+        created = hub is None
+        hub = dict(hub or {})
+        hub["internal_url"] = flag(rest, "--internal-url") or f"http://hub-{name}.chefs-hubs.svc:8080"
+        hub["public_url"] = flag(rest, "--public-url")
+        hub["status"] = "active"
+        if flag(rest, "--chef"):
+            hub["chef_name"] = flag(rest, "--chef")
+        pf["hubs"][name] = hub
+        save(state)
+        print(json.dumps({"name": name, **hub, "created": created}))
+        return 0
+    if sub == "remove-hub":
+        if pf["hubs"].pop(name, None) is not None:
+            save(state)
+            print(f"hub {name} removed from the platform with its index rows")
+        else:
+            print(f"hub {name} is not registered")
+        return 0
+    if sub in ("poll", "hubs"):
+        print(json.dumps([]))
+        return 0
+    print(f"fake platform: unsupported {args}", file=sys.stderr)
     return 2
 
 
@@ -228,6 +262,12 @@ def main(argv):
                 print(f'Error from server (NotFound): deployments.apps "{name}" not found', file=sys.stderr)
                 return 1
             return gateway_cli(state, command[1:])
+        if command and command[0].rsplit("/", 1)[-1] == "platform":
+            name = target.split("/", 1)[-1]
+            if key("Deployment", ns, name) not in state:
+                print(f'Error from server (NotFound): deployments.apps "{name}" not found', file=sys.stderr)
+                return 1
+            return platform_cli(state, command[1:])
         print("exec ok")
         return 0
     if cmd in ("cp", "exec", "run", "top", "label", "annotate"):

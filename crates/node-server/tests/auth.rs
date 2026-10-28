@@ -146,7 +146,10 @@ fn bearer() -> (&'static str, String) {
 
 fn recipe(title: &str, public: bool) -> Value {
     json!({"title": title, "language": "nl", "servings": 2, "is_public": public,
-        "ingredients": [{"raw_text": "1 ei", "metric_amount": 1.0, "unit": "pcs", "canonical_id": "egg", "is_specialty": false}],
+        "ingredients": [
+            {"raw_text": "1 ei", "metric_amount": 1.0, "unit": "pcs", "canonical_id": "egg", "is_specialty": false},
+            {"raw_text": "1 el gochujang", "metric_amount": 15.0, "unit": "ml", "canonical_id": "gochujang", "is_specialty": true}
+        ],
         "instructions": [{"step_number": 1, "text": "Bak.", "timer_seconds": null}], "tags": ["snel"]})
 }
 
@@ -318,7 +321,14 @@ async fn anonymous_readers_get_cached_translations_but_never_trigger_the_model()
         "no cached translation: source wording"
     );
     assert!(r["translation"].is_null());
-    assert!(r["ingredients"][0].get("canonical_label").is_none());
+    assert_eq!(
+        r["ingredients"][0]["canonical_label"], "яйцо",
+        "a seeded dictionary label counts as cached, so anonymous readers get it for free"
+    );
+    assert!(
+        r["ingredients"][1].get("canonical_label").is_none(),
+        "an uncached label is not fetched for anonymous readers"
+    );
     assert_eq!(
         fake.calls.load(Ordering::SeqCst),
         0,
@@ -351,9 +361,10 @@ async fn anonymous_readers_get_cached_translations_but_never_trigger_the_model()
         "cached translation is served to everyone"
     );
     assert_eq!(
-        cached["ingredients"][0]["canonical_label"], "ru:egg",
+        cached["ingredients"][1]["canonical_label"], "ru:gochujang",
         "cached labels too"
     );
+    assert_eq!(cached["ingredients"][0]["canonical_label"], "яйцо");
     assert_eq!(
         fake.calls.load(Ordering::SeqCst),
         after_owner,

@@ -126,6 +126,13 @@ async fn add_hub_json_prints_one_object_with_the_token() {
     assert_eq!(v["name"], "demo");
     assert_eq!(v["token"].as_str().unwrap().len(), 64);
     assert!(v["created_at"].is_string());
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["created_at", "name", "token"],
+        "hubctl parses exactly this shape"
+    );
 }
 
 #[tokio::test]
@@ -220,4 +227,23 @@ async fn usage_prints_rows_as_json_filtered_by_hub_and_day() {
     assert_eq!(rows[0]["hub"], "jacob");
     assert_eq!(rows[0]["requests"], 1);
     assert_eq!(rows[0]["input_tokens"], 10);
+    let mut keys: Vec<&str> = rows[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "cost_cents",
+            "day",
+            "hub",
+            "input_tokens",
+            "output_tokens",
+            "requests"
+        ],
+        "hubctl parses exactly these fields"
+    );
 }

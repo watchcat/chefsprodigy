@@ -71,8 +71,10 @@ design around this image is in [docs/SPEC-hosted-platform.md](docs/SPEC-hosted-p
 
 `deploy/` runs many hubs on one k3s node behind Cloudflare: `hubctl` (create, backup,
 restore, upgrade hubs), the `llm-gateway` (vendor keys stay there; hubs get per-hub tokens
-and usage is recorded) and a nightly backup job to Cloudflare R2. The step-by-step how-to
-is [deploy/README.md](deploy/README.md).
+and usage is recorded), the `platform` on the apex (it polls every hub's federation manifest
+and serves one search over all public recipes, translated titles and tags included, with
+forks of the same dish grouped) and a nightly backup job to Cloudflare R2. The step-by-step
+how-to is [deploy/README.md](deploy/README.md).
 
 ### Configuration (`.env`)
 

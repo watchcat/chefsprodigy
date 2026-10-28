@@ -7,6 +7,7 @@ members = [
     "crates/recipe-mcp",
     "crates/node-server",
     "crates/llm-gateway",
+    "crates/platform",
 ]
 
 [workspace.package]
@@ -53,6 +54,7 @@ zip = { version = "9.0", default-features = false, features = ["deflate"] }
 ulid = "3.0"
 sha2 = "0.11"
 rand = "0.9"
+chacha20poly1305 = "0.10"
 
 # Errors, logging, CLI, time
 thiserror = "2.0"

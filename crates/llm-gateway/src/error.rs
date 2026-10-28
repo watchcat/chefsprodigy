@@ -25,6 +25,12 @@ pub enum GatewayError {
     /// The vendor could not be reached or answered garbage.
     #[error("upstream request failed: {0}")]
     Upstream(String),
+    /// The hub's free-tier quota is used up; nothing was sent upstream.
+    #[error("{0}")]
+    QuotaExceeded(String),
+    /// BYOK encryption or decryption failed.
+    #[error("crypto error: {0}")]
+    Crypto(String),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
     #[error("migration error: {0}")]
@@ -41,7 +47,10 @@ impl GatewayError {
             Self::NotImplemented(_) => (StatusCode::NOT_IMPLEMENTED, "api_error"),
             Self::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "api_error"),
             Self::Upstream(_) => (StatusCode::BAD_GATEWAY, "api_error"),
-            Self::Db(_) | Self::Migrate(_) => (StatusCode::INTERNAL_SERVER_ERROR, "api_error"),
+            Self::QuotaExceeded(_) => (StatusCode::TOO_MANY_REQUESTS, "quota_exceeded"),
+            Self::Db(_) | Self::Migrate(_) | Self::Crypto(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "api_error")
+            }
         }
     }
 }
@@ -50,7 +59,7 @@ impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let (status, kind) = self.status_and_kind();
         let message = match &self {
-            Self::Db(_) | Self::Migrate(_) => {
+            Self::Db(_) | Self::Migrate(_) | Self::Crypto(_) => {
                 tracing::error!(error = %self, "internal error");
                 "internal error".to_string()
             }

@@ -12,6 +12,7 @@ use crate::langdetect::detect_language;
 use crate::llm::{
     ExtractedRecipeDraft, PhotoExtraction, RecipeExtractor, TranslationReply, TranslationRequest,
 };
+use crate::normalize::heuristic_ingredient;
 use crate::sanitize::html_to_markdown;
 use crate::ssrf::{self, UrlGuard};
 
@@ -173,7 +174,18 @@ impl RecipeImporter {
         s: SchemaOrgRecipe,
         origin_url: Option<&str>,
     ) -> Result<ImportResult, ScraperError> {
-        let ingredients = self.extractor.normalize_ingredients(&s.ingredients).await?;
+        let ingredients = match self.extractor.normalize_ingredients(&s.ingredients).await {
+            Ok(items) => items,
+            // JSON-LD needs no model; keep importing it when the model is over its limit.
+            Err(ScraperError::ModelQuotaExceeded(reason)) => {
+                tracing::warn!(%reason, "model refused; normalizing JSON-LD ingredients locally");
+                s.ingredients
+                    .iter()
+                    .map(|r| heuristic_ingredient(r))
+                    .collect()
+            }
+            Err(e) => return Err(e),
+        };
         let (prep, cook) = match (s.prep_minutes, s.cook_minutes, s.total_minutes) {
             (None, None, Some(total)) => (None, Some(total)),
             (p, c, _) => (p, c),

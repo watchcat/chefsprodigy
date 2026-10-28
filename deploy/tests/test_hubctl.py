@@ -427,6 +427,25 @@ class Gateway(HubctlCase):
         self.assertEqual(data["MINIMAX_ANTHROPIC_API_BASE"], "https://api.minimaxi.com/anthropic")
         self.assertEqual(data["ANTHROPIC_API_KEY"], "anthropic-vendor-key")
 
+    def test_master_key_and_cache_settings_reach_the_gateway_and_render_masks_the_master_key(self):
+        self.write_env(GATEWAY_MASTER_KEY="master-key-for-tests", GATEWAY_CACHE_TTL_DAYS="7",
+                       GATEWAY_CACHE_MAX_ENTRIES="500")
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("master-key-for-tests", out, "the master key is never printed")
+        data = self.obj("Secret", "chefs-system", "llm-gateway-env")["stringData"]
+        self.assertEqual(data["GATEWAY_MASTER_KEY"], "master-key-for-tests")
+        self.assertEqual(data["GATEWAY_CACHE_TTL_DAYS"], "7")
+        self.assertEqual(data["GATEWAY_CACHE_MAX_ENTRIES"], "500")
+
+        code, out = self.run_hubctl("render", "--json", "all")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("master-key-for-tests", out, "render masks the master key like the vendor keys")
+        secret = next(i for i in json.loads(out)["items"]
+                      if i["kind"] == "Secret" and i["metadata"]["name"] == "llm-gateway-env")
+        self.assertEqual(secret["stringData"]["GATEWAY_MASTER_KEY"], hubctl.GATEWAY_PLACEHOLDER)
+        self.assertEqual(secret["stringData"]["GATEWAY_CACHE_TTL_DAYS"], "7", "plain settings stay readable")
+
     def test_create_registers_the_hub_and_gives_it_a_gateway_token(self):
         self.write_env(LLM_API_KEY="generic-vendor-key")
         code, out = self.run_hubctl("create", "demo")
@@ -452,7 +471,7 @@ class Gateway(HubctlCase):
         code, out = self.run_hubctl("create", "demo")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]["MINIMAX_API_KEY"], token)
-        self.assertFalse(any("add-hub" in c for c in self.calls()), self.calls())
+        self.assertFalse(any("llm-gateway add-hub" in c for c in self.calls()), self.calls())
 
     def test_create_moves_a_direct_hub_onto_the_gateway(self):
         self.write_env(LLM_GATEWAY="off", LLM_API_KEY="generic-vendor-key")
@@ -556,6 +575,168 @@ class Gateway(HubctlCase):
         self.assertNotIn("vendor-key-for-tests", out, "render masks the gateway's vendor keys")
 
 
+PLATFORM_EXEC = "exec deploy/platform -n chefs-system -- /usr/local/bin/platform"
+
+
+class Platform(HubctlCase):
+    def platform_state(self):
+        return self.raw_state().get("_platform", {"hubs": {}})
+
+    def test_init_deploys_the_platform_with_an_apex_ingress_for_the_public_api_only(self):
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertIn("platform", out)
+        secret = self.obj("Secret", "chefs-system", "platform-env")
+        self.assertEqual(secret["stringData"], {}, "no admin token in .env: admin API off")
+        pvc = self.obj("PersistentVolumeClaim", "chefs-system", "platform-data")
+        self.assertEqual(pvc["spec"]["storageClassName"], "local-path")
+        dep = self.obj("Deployment", "chefs-system", "platform")
+        self.assertEqual(dep["spec"]["replicas"], 1)
+        self.assertEqual(dep["spec"]["strategy"], {"type": "Recreate"}, "one SQLite writer at a time")
+        labels = dep["spec"]["template"]["metadata"]["labels"]
+        self.assertEqual(labels, {"app": "platform", "role": "hub-client"})
+        pod = dep["spec"]["template"]["spec"]
+        c = pod["containers"][0]
+        self.assertEqual(c["image"], "ghcr.io/example/hub:1.2.3", "same image as the hubs")
+        self.assertEqual(c["command"], ["/usr/local/bin/platform"])
+        self.assertEqual(c["args"], ["serve"])
+        self.assertEqual(c["envFrom"], [{"secretRef": {"name": "platform-env"}}])
+        env = {e["name"]: e["value"] for e in c["env"]}
+        self.assertEqual(env, {"PLATFORM_PORT": "8080", "PLATFORM_DATA_DIR": "/data", "TOKIO_WORKER_THREADS": "2"})
+        self.assertEqual(c["readinessProbe"]["httpGet"]["path"], "/health")
+        self.assertEqual(c["livenessProbe"]["httpGet"]["path"], "/health")
+        self.assertEqual(c["resources"]["limits"]["memory"], "128Mi")
+        self.assertTrue(c["securityContext"]["readOnlyRootFilesystem"])
+        self.assertEqual(c["securityContext"]["capabilities"], {"drop": ["ALL"]})
+        self.assertFalse(pod["automountServiceAccountToken"])
+        self.assertEqual(pod["securityContext"]["runAsUser"], 65532)
+        svc = self.obj("Service", "chefs-system", "platform")
+        self.assertEqual(svc["spec"]["selector"], {"app": "platform"})
+        self.assertEqual(svc["spec"]["ports"][0]["port"], 8080)
+
+        ingress = self.obj("Ingress", "chefs-system", "platform")
+        rule = ingress["spec"]["rules"][0]
+        self.assertEqual(rule["host"], "example.test", "the apex")
+        paths = {p["path"]: p["pathType"] for p in rule["http"]["paths"]}
+        self.assertEqual(paths, {"/api/v1/search": "Prefix", "/api/v1/hubs": "Prefix", "/health": "Exact"})
+        self.assertFalse(any(p.startswith("/admin") or p == "/" for p in paths), "/admin never reaches the internet")
+        annotations = ingress["metadata"]["annotations"]
+        self.assertEqual(annotations["traefik.ingress.kubernetes.io/router.entrypoints"], "web", "TLS_MODE=off")
+        self.assertEqual(annotations["traefik.ingress.kubernetes.io/router.middlewares"], "chefs-system-headers@kubernetescrd")
+        self.assertNotIn("tls", ingress["spec"])
+        policy = self.obj("NetworkPolicy", "chefs-system", "platform-ingress")
+        self.assertEqual(policy["spec"]["podSelector"], {"matchLabels": {"app": "platform"}})
+        self.assertIn("kube-system", json.dumps(policy["spec"]["ingress"]), "Traefik may reach the platform")
+
+    def test_the_hub_ingress_policy_admits_the_platform_poller(self):
+        self.run_hubctl("init")
+        labels = self.obj("Deployment", "chefs-system", "platform")["spec"]["template"]["metadata"]["labels"]
+        rule = self.obj("NetworkPolicy", "chefs-hubs", "hub-ingress")["spec"]["ingress"][0]
+        system = [f for f in rule["from"] if f.get("namespaceSelector", {}).get("matchLabels", {})
+                  .get("kubernetes.io/metadata.name") == "chefs-system"]
+        self.assertTrue(system, rule)
+        for key, value in system[0]["podSelector"]["matchLabels"].items():
+            self.assertEqual(labels.get(key), value, "platform pods match the hub-ingress podSelector")
+
+    def test_origin_mode_serves_the_apex_over_websecure_with_tls(self):
+        self.write_env(TLS_MODE="origin")
+        self.seed_origin_secret()
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        ingress = self.obj("Ingress", "chefs-system", "platform")
+        self.assertEqual(ingress["spec"]["tls"], [{"hosts": ["example.test"]}])
+        self.assertEqual(ingress["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"], "websecure")
+
+    def test_admin_token_and_poll_settings_reach_the_platform_and_render_masks_the_token(self):
+        self.write_env(PLATFORM_ADMIN_TOKEN="platform-admin-secret", PLATFORM_POLL_INTERVAL_SECS="300",
+                       PLATFORM_MEM_LIMIT="96Mi", PLATFORM_STORAGE="2Gi")
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("platform-admin-secret", out)
+        data = self.obj("Secret", "chefs-system", "platform-env")["stringData"]
+        self.assertEqual(data, {"PLATFORM_ADMIN_TOKEN": "platform-admin-secret", "PLATFORM_POLL_INTERVAL_SECS": "300"})
+        dep = self.obj("Deployment", "chefs-system", "platform")
+        self.assertEqual(dep["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]["memory"], "96Mi")
+        self.assertEqual(self.obj("PersistentVolumeClaim", "chefs-system", "platform-data")["spec"]["resources"]["requests"]["storage"], "2Gi")
+        before = dep["spec"]["template"]["metadata"]["annotations"]["chefsprodigy/env-checksum"]
+        self.write_env(PLATFORM_ADMIN_TOKEN="rotated-admin-secret")
+        self.run_hubctl("init")
+        after = self.obj("Deployment", "chefs-system", "platform")["spec"]["template"]["metadata"]["annotations"]
+        self.assertNotEqual(after["chefsprodigy/env-checksum"], before, "a changed Secret restarts the platform")
+
+        code, out = self.run_hubctl("render", "--json", "all")
+        self.assertEqual(code, 0, out)
+        items = json.loads(out)["items"]
+        self.assertIn(("Ingress", "platform"), {(i["kind"], i["metadata"]["name"]) for i in items})
+        self.assertNotIn("rotated-admin-secret", out, "render masks the admin token")
+        secret = next(i for i in items if i["kind"] == "Secret" and i["metadata"]["name"] == "platform-env")
+        self.assertEqual(secret["stringData"]["PLATFORM_ADMIN_TOKEN"], hubctl.PLATFORM_PLACEHOLDER)
+
+    def test_create_registers_the_hub_with_its_cluster_and_public_urls(self):
+        code, out = self.run_hubctl("create", "demo", "--chef", "Demo Chef")
+        self.assertEqual(code, 0, out)
+        hub = self.platform_state()["hubs"]["demo"]
+        self.assertEqual(hub["internal_url"], "http://hub-demo.chefs-hubs.svc:8080")
+        self.assertEqual(hub["public_url"], "http://demo.example.test")
+        self.assertEqual(hub["chef_name"], "Demo Chef")
+        calls = self.calls()
+        register = next(i for i, c in enumerate(calls) if f"{PLATFORM_EXEC} add-hub demo" in c)
+        self.assertIn("--internal-url http://hub-demo.chefs-hubs.svc:8080 --public-url http://demo.example.test",
+                      calls[register])
+        hub_ready = next(i for i, c in enumerate(calls) if "rollout status statefulset/hub-demo" in c)
+        platform_ready = next(i for i, c in enumerate(calls) if "rollout status deployment/platform" in c)
+        self.assertLess(hub_ready, register, "the hub is up before it is registered")
+        self.assertLess(platform_ready, register, "the platform is ready before hubctl registers the hub")
+        self.assertIn("registered at platform", out)
+
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.platform_state()["hubs"]["demo"]["chef_name"], "Demo Chef",
+                         "a repeated create re-registers with the stored chef name")
+
+    def test_create_reports_a_failed_registration(self):
+        self.run_hubctl("init")
+        state = self.raw_state()
+        del state["deployment/chefs-system/platform"]
+        self.state.write_text(json.dumps(state))
+        hubctl_platform_manifests = hubctl.platform_manifests
+        hubctl.platform_manifests = lambda cfg, values: []  # the platform Deployment does not come up
+        try:
+            code, out = self.run_hubctl("create", "demo")
+        finally:
+            hubctl.platform_manifests = hubctl_platform_manifests
+        self.assertEqual(code, 1, out)
+        self.assertIn("could not register demo", out)
+        self.assertIn("statefulset/chefs-hubs/hub-demo", self.objects(), "the hub itself is still created")
+
+    def test_remove_unregisters_the_hub_from_the_platform(self):
+        self.run_hubctl("create", "demo")
+        code, out = self.run_hubctl("remove", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("demo", self.platform_state()["hubs"])
+        self.assertTrue(any(f"{PLATFORM_EXEC} remove-hub demo" in c for c in self.calls()), self.calls())
+        self.assertIn("search index cleared", out)
+
+    def test_upgrade_rolls_the_platform_after_the_gateway_and_before_the_hubs(self):
+        self.run_hubctl("create", "demo")
+        self.write_env(HUB_IMAGE="ghcr.io/example/hub:2.0.0")
+        self.log.write_text("")
+        code, out = self.run_hubctl("upgrade")
+        self.assertEqual(code, 0, out)
+        dep = self.obj("Deployment", "chefs-system", "platform")
+        self.assertEqual(dep["spec"]["template"]["spec"]["containers"][0]["image"], "ghcr.io/example/hub:2.0.0")
+        images = [c for c in self.calls() if c.startswith("set image")]
+        order = [c.split()[2] for c in images]
+        self.assertEqual(order, ["deployment/llm-gateway", "deployment/platform", "statefulset/hub-demo"])
+        self.assertIn("platform: ready", out)
+
+    def test_status_shows_the_platform(self):
+        self.run_hubctl("create", "demo")
+        code, out = self.run_hubctl("status")
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r"platform\s+http://example\.test\s+Running ready")
+
+
 try:  # PyYAML is optional: when present the emitted YAML is parsed back and compared.
     import yaml  # type: ignore
 except ImportError:  # pragma: no cover
@@ -563,7 +744,7 @@ except ImportError:  # pragma: no cover
 
 K8S_DIR = HERE.parent / "k8s"
 REFERENCE_FILES = ["namespaces.yaml", "network-policies.yaml", "traefik-config.yaml", "backup-cronjob.yaml",
-                   "llm-gateway.yaml", "hub.example.yaml"]
+                   "llm-gateway.yaml", "platform.yaml", "hub.example.yaml"]
 
 
 class Render(HubctlCase):
@@ -621,6 +802,14 @@ class Render(HubctlCase):
         self.assertNotRegex(gateway, r"[0-9a-f]{64}", "no real key in the gateway example")
         self.assertIn('MINIMAX_ANTHROPIC_API_BASE: "http://llm-gateway.chefs-system.svc:8080/anthropic"', hub,
                       "the example hub talks to the gateway")
+        platform = (out_dir / "platform.yaml").read_text()
+        for kind in ("Secret", "PersistentVolumeClaim", "Deployment", "Service", "Ingress", "NetworkPolicy"):
+            self.assertIn(f"kind: {kind}\n", platform)
+        self.assertIn("- host: chefslegacy.com\n", platform, "the apex Ingress")
+        self.assertIn("websecure", platform)
+        self.assertNotIn("/admin", platform)
+        self.assertIn(f'PLATFORM_ADMIN_TOKEN: "{hubctl.PLATFORM_PLACEHOLDER}"', platform)
+        self.assertNotRegex(platform, r"[0-9a-f]{64}", "no real token in the platform example")
 
     @unittest.skipUnless(yaml, "PyYAML not installed")
     def test_reference_files_parse_as_yaml(self):

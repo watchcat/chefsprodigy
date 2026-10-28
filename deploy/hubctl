@@ -7,7 +7,8 @@ section 5.6 and deploy/README.md. Settings live in ``<root>/.env`` (``--root``,
 
     chefs-system   Traefik middlewares, the backup CronJob and its RBAC, the R2
                    credentials Secret, the llm-gateway (Deployment, Service, PVC,
-                   Secret with the vendor keys); later: platform, provisioner
+                   Secret with the vendor keys), the platform (hub registry, poller,
+                   search; Deployment, Service, PVC, apex Ingress); later: provisioner
     chefs-hubs     one Secret + StatefulSet + Service + Ingress + PVC per hub,
                    default-deny NetworkPolicies
     kube-system    Traefik's HelmChartConfig and the Origin CA default TLSStore
@@ -66,6 +67,7 @@ GATEWAY_VENDOR_KEYS = ("MINIMAX_API_KEY", "ANTHROPIC_API_KEY")
 GATEWAY_ENV_KEYS = GATEWAY_VENDOR_KEYS + (
     "MINIMAX_ANTHROPIC_API_BASE", "ANTHROPIC_API_BASE", "GATEWAY_ADMIN_TOKEN",
     "GATEWAY_LOG_CONTENT", "GATEWAY_UPSTREAM_TIMEOUT_SECS", "RUST_LOG",
+    "GATEWAY_MASTER_KEY", "GATEWAY_CACHE_TTL_DAYS", "GATEWAY_CACHE_MAX_ENTRIES",
 )
 # What a gateway-served hub gets from .env, and the direct-access settings it must not keep
 # (LLM_API_KEY would override the gateway token in rig).
@@ -349,8 +351,8 @@ class Config:
         return {k: self.env[k] for k in GATEWAY_ENV_KEYS if self.env.get(k)}
 
     def gateway_placeholder_env(self) -> Dict[str, str]:
-        """The gateway Secret as `render` shows it: vendor keys and the admin token masked."""
-        masked = set(GATEWAY_VENDOR_KEYS) | {"GATEWAY_ADMIN_TOKEN"}
+        """The gateway Secret as `render` shows it: vendor keys, admin token and master key masked."""
+        masked = set(GATEWAY_VENDOR_KEYS) | {"GATEWAY_ADMIN_TOKEN", "GATEWAY_MASTER_KEY"}
         return {k: (GATEWAY_PLACEHOLDER if k in masked else v) for k, v in self.gateway_env().items()}
 
     @classmethod
@@ -863,6 +865,7 @@ def ensure_base(cfg: Config, kube: Kube) -> None:
     kube.apply(network_policies() + traefik_config(cfg) + backup_manifests(cfg))
     if cfg.gateway_enabled:
         kube.apply(gateway_manifests(cfg, cfg.gateway_env()))
+    kube.apply(platform_manifests(cfg, platform_env(cfg)))
 
 
 # ----------------------------------------------------------------------------- gateway
@@ -934,6 +937,190 @@ def placeholder_values(cfg: Config, name: str) -> Dict[str, str]:
     return values
 
 
+# ----------------------------------------------------------------------------- platform
+
+# The platform (spec 5.3): hub registry, federation poller and search index on the apex.
+PLATFORM = "platform"
+PLATFORM_BIN = "/usr/local/bin/platform"
+PLATFORM_ENV_KEYS = (
+    "PLATFORM_ADMIN_TOKEN", "PLATFORM_POLL_INTERVAL_SECS", "PLATFORM_POLL_JITTER_SECS",
+    "PLATFORM_BACKOFF_MAX_SECS", "PLATFORM_HTTP_TIMEOUT_SECS", "RUST_LOG",
+)
+PLATFORM_PLACEHOLDER = "<copied from .env by hubctl init>"
+# The apex Ingress routes only the public API; /admin stays inside the cluster (hubctl
+# uses the CLI through kubectl exec). RN-70 adds the search page at /.
+PLATFORM_PUBLIC_PATHS = (("/api/v1/search", "Prefix"), ("/api/v1/hubs", "Prefix"), ("/health", "Exact"))
+
+
+def hub_internal_url(name: str) -> str:
+    """The hub's Service, which the platform's poller reaches through the hub-ingress policy."""
+    return f"http://hub-{name}.{NS_HUBS}.svc:8080"
+
+
+def apex_url(cfg: Config) -> str:
+    return f"{cfg.scheme}://{cfg.domain}"
+
+
+def platform_env(cfg: Config) -> Dict[str, str]:
+    return {k: cfg.env[k] for k in PLATFORM_ENV_KEYS if cfg.env.get(k)}
+
+
+def platform_placeholder_env(cfg: Config) -> Dict[str, str]:
+    """The platform Secret as `render` shows it: the admin token masked."""
+    return {k: (PLATFORM_PLACEHOLDER if k == "PLATFORM_ADMIN_TOKEN" else v) for k, v in platform_env(cfg).items()}
+
+
+def platform_manifests(cfg: Config, values: Dict[str, str]) -> List[dict]:
+    """Secret + PVC + Deployment + Service + apex Ingress + ingress NetworkPolicy for the
+    platform (spec 5.3). Same image as the hubs; one replica with Recreate because
+    platform.db is SQLite on a ReadWriteOnce volume. The pods carry `role: hub-client`, which
+    the hub-ingress policy admits, so the poller reaches every hub's Service."""
+    labels = {"app": PLATFORM}
+    pod_labels = {"app": PLATFORM, "role": "hub-client"}
+    checksum = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:16]
+    storage = cfg.env.get("PLATFORM_STORAGE", "1Gi")
+    mem_limit = cfg.env.get("PLATFORM_MEM_LIMIT", "128Mi")
+    annotations = {
+        "traefik.ingress.kubernetes.io/router.entrypoints": "websecure" if cfg.tls else "web",
+        "traefik.ingress.kubernetes.io/router.middlewares": MIDDLEWARES,
+    }
+    paths = [{"path": path, "pathType": kind,
+              "backend": {"service": {"name": PLATFORM, "port": {"number": 8080}}}}
+             for path, kind in PLATFORM_PUBLIC_PATHS]
+    ingress_spec: dict = {"rules": [{"host": cfg.domain, "http": {"paths": paths}}]}
+    if cfg.tls:
+        ingress_spec["tls"] = [{"hosts": [cfg.domain]}]
+    return [
+        {
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": meta(f"{PLATFORM}-env", NS_SYSTEM, labels),
+            "type": "Opaque",
+            "stringData": dict(values),
+        },
+        {
+            "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": meta(f"{PLATFORM}-data", NS_SYSTEM, labels),
+            "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": "local-path",
+                     "resources": {"requests": {"storage": storage}}},
+        },
+        {
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": meta(PLATFORM, NS_SYSTEM, labels),
+            "spec": {
+                "replicas": 1,
+                "strategy": {"type": "Recreate"},
+                "selector": {"matchLabels": labels},
+                "template": {
+                    "metadata": {"labels": pod_labels, "annotations": {"chefsprodigy/env-checksum": checksum}},
+                    "spec": {
+                        "automountServiceAccountToken": False,
+                        "securityContext": {
+                            "runAsNonRoot": True, "runAsUser": HUB_UID, "runAsGroup": HUB_UID,
+                            "fsGroup": HUB_UID, "seccompProfile": {"type": "RuntimeDefault"},
+                        },
+                        "containers": [{
+                            "name": PLATFORM,
+                            "image": cfg.hub_image,
+                            "command": [PLATFORM_BIN],
+                            "args": ["serve"],
+                            "env": [
+                                {"name": "PLATFORM_PORT", "value": "8080"},
+                                {"name": "PLATFORM_DATA_DIR", "value": "/data"},
+                                {"name": "TOKIO_WORKER_THREADS", "value": "2"},
+                            ],
+                            "envFrom": [{"secretRef": {"name": f"{PLATFORM}-env"}}],
+                            "ports": [{"containerPort": 8080, "name": "http"}],
+                            "volumeMounts": [
+                                {"name": "data", "mountPath": "/data"},
+                                {"name": "tmp", "mountPath": "/tmp"},
+                            ],
+                            "resources": {
+                                "requests": {"cpu": "50m", "memory": "32Mi"},
+                                "limits": {"cpu": "500m", "memory": mem_limit},
+                            },
+                            "securityContext": {
+                                "readOnlyRootFilesystem": True,
+                                "allowPrivilegeEscalation": False,
+                                "capabilities": {"drop": ["ALL"]},
+                            },
+                            "readinessProbe": {"httpGet": {"path": "/health", "port": "http"}, "periodSeconds": 10},
+                            "livenessProbe": {"httpGet": {"path": "/health", "port": "http"},
+                                              "periodSeconds": 30, "failureThreshold": 3},
+                        }],
+                        "volumes": [
+                            {"name": "data", "persistentVolumeClaim": {"claimName": f"{PLATFORM}-data"}},
+                            {"name": "tmp", "emptyDir": {}},
+                        ],
+                    },
+                },
+            },
+        },
+        {
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": meta(PLATFORM, NS_SYSTEM, labels),
+            "spec": {"selector": labels, "ports": [{"name": "http", "port": 8080, "targetPort": "http"}]},
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+            "metadata": meta(PLATFORM, NS_SYSTEM, labels, annotations),
+            "spec": ingress_spec,
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": meta(f"{PLATFORM}-ingress", NS_SYSTEM),
+            "spec": {
+                "podSelector": {"matchLabels": labels},
+                "policyTypes": ["Ingress"],
+                "ingress": [{
+                    "from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": NS_TRAEFIK}}}],
+                    "ports": [{"protocol": "TCP", "port": 8080}],
+                }],
+            },
+        },
+    ]
+
+
+def platform_cli(kube: Kube, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Run the platform CLI inside its pod: it opens the same platform.db as the server."""
+    return kube.run("exec", f"deploy/{PLATFORM}", "-n", NS_SYSTEM, "--", PLATFORM_BIN, *args, check=check)
+
+
+def platform_installed(kube: Kube) -> bool:
+    return kube.get("deployment", PLATFORM, NS_SYSTEM) is not None
+
+
+def register_with_platform(cfg: Config, kube: Kube, name: str, chef: str) -> bool:
+    """Register the hub (or update its URLs and chef) so the poller indexes its public recipes."""
+    if not kube.rollout_status(PLATFORM, NS_SYSTEM, "120s", kind="deployment"):
+        print(f"warning: {PLATFORM} is not ready, hub {name} is not registered for search; run "
+              f"hubctl create {name} again later (kubectl -n {NS_SYSTEM} logs deploy/{PLATFORM})", file=sys.stderr)
+        return False
+    result = platform_cli(kube, "add-hub", name, "--internal-url", hub_internal_url(name),
+                          "--public-url", cfg.public_url(name), "--chef", chef, "--json", check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        print(f"warning: could not register {name} at {PLATFORM}: {detail}", file=sys.stderr)
+        return False
+    print(f"registered at {PLATFORM}: public recipes appear in {apex_url(cfg)}/api/v1/search after the next poll "
+          f"(every 10 minutes; now: kubectl -n {NS_SYSTEM} exec deploy/{PLATFORM} -- platform poll --hub {name})")
+    return True
+
+
+def unregister_from_platform(kube: Kube, name: str) -> None:
+    result = platform_cli(kube, "remove-hub", name, check=False)
+    if result.returncode == 0:
+        print(f"search index cleared ({result.stdout.strip()})")
+    else:
+        print(f"warning: could not remove {name} from {PLATFORM}: {(result.stderr or '').strip()}", file=sys.stderr)
+
+
+def upgrade_platform(cfg: Config, kube: Kube) -> bool:
+    kube.set_image(PLATFORM, NS_SYSTEM, cfg.hub_image, kind="deployment", container=PLATFORM)
+    ready = kube.rollout_status(PLATFORM, NS_SYSTEM, kind="deployment")
+    print(f"{PLATFORM}: {'ready' if ready else 'not ready'} on {cfg.hub_image}")
+    return ready
+
+
 REFERENCE_HUB = "jacob"
 
 
@@ -952,6 +1139,9 @@ def reference_manifests(cfg: Config) -> Dict[str, str]:
         "traefik-config.yaml": yaml_documents(traefik_config(cfg), header),
         "backup-cronjob.yaml": yaml_documents(backup_manifests(cfg), header),
         "llm-gateway.yaml": yaml_documents(gateway_manifests(cfg, cfg.gateway_placeholder_env()), header),
+        "platform.yaml": yaml_documents(
+            platform_manifests(cfg, {"PLATFORM_ADMIN_TOKEN": PLATFORM_PLACEHOLDER}), header
+        ),
         "hub.example.yaml": yaml_documents(
             hub_manifests(cfg, REFERENCE_HUB, placeholder_values(cfg, REFERENCE_HUB)), hub_header
         ),
@@ -970,6 +1160,8 @@ def cmd_init(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
         print(f"model gateway: {GATEWAY} at {GATEWAY_URL} holds {keys}; hubs get per-hub tokens")
     else:
         print("model gateway: off (LLM_GATEWAY=off or no vendor key in .env); hubs call the vendor directly")
+    admin = "on (PLATFORM_ADMIN_TOKEN)" if cfg.env.get("PLATFORM_ADMIN_TOKEN") else "off, the CLI is used"
+    print(f"platform: search at {apex_url(cfg)}/api/v1/search, hub registry and poller; admin API {admin}")
     names = hub_names(kube)
     print(f"hubs: {', '.join(names) or 'none yet'}")
     return 0
@@ -994,11 +1186,12 @@ def cmd_create(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     kube.apply(hub_manifests(cfg, name, values))
     ready = kube.rollout_status(f"hub-{name}", NS_HUBS)
     print(f"hub {name} is {'up' if ready else 'not ready yet'} at {cfg.public_url(name)}")
+    registered = register_with_platform(cfg, kube, name, values["NODE_CHEF_NAME"])
     if new_key:
         print(f"owner key (shown once, store it safely): {values['NODE_API_KEY']}")
     url, expires = login_url(cfg, name, values["NODE_API_KEY"])
     print(f"sign-in link (valid until {fmt_time(expires)}, accepted by hubs with RN-73): {url}")
-    return 0 if ready else 1
+    return 0 if ready and registered else 1
 
 
 def cmd_remove(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
@@ -1013,6 +1206,8 @@ def cmd_remove(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
             print(f"gateway token revoked ({result.stdout.strip()})")
         else:
             print(f"warning: could not disable {name} at {GATEWAY}: {(result.stderr or '').strip()}", file=sys.stderr)
+    if platform_installed(kube):
+        unregister_from_platform(kube, name)
     if args.purge:
         kube.delete("pvc", f"data-hub-{name}-0", NS_HUBS)
         print(f"volume of {name} deleted")
@@ -1038,6 +1233,9 @@ def cmd_status(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
     if gateway_installed(kube):
         gw_pods = kube.pods(NS_SYSTEM, f"app={GATEWAY}")
         print(f"{GATEWAY:<24} {GATEWAY_URL:<44} {pod_state(gw_pods[0] if gw_pods else None)}")
+    if platform_installed(kube):
+        pf_pods = kube.pods(NS_SYSTEM, f"app={PLATFORM}")
+        print(f"{PLATFORM:<24} {apex_url(cfg):<44} {pod_state(pf_pods[0] if pf_pods else None)}")
     pods = kube.pods(NS_HUBS, "app=hub")
     by_hub = {p["metadata"].get("labels", {}).get("hub", "?"): p for p in pods}
     for name in hub_names(kube):
@@ -1192,6 +1390,8 @@ def cmd_upgrade(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
         print(f"{GATEWAY}: {'ready' if ready else 'not ready'} on {cfg.hub_image}")
         if not ready:
             failed.append(GATEWAY)
+    if everything and platform_installed(kube) and not upgrade_platform(cfg, kube):
+        failed.append(PLATFORM)
     if not targets:
         print("no hubs to upgrade")
         return 1 if failed else 0
@@ -1217,6 +1417,7 @@ def cmd_render(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
         objects = namespaces() + network_policies() + traefik_config(cfg) + backup_manifests(cfg)
         if cfg.gateway_enabled:
             objects += gateway_manifests(cfg, cfg.gateway_placeholder_env())
+        objects += platform_manifests(cfg, platform_placeholder_env(cfg))
     else:
         name = validate_name(args.name)
         values = hub_values(cfg, kube, name) or placeholder_values(cfg, name)
@@ -1237,7 +1438,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"directory holding .env (default: $HUBCTL_ROOT or {DEFAULT_ROOT})")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("init", help="namespaces, network policies, Traefik config, backup CronJob, llm-gateway")
+    p = sub.add_parser("init", help="namespaces, network policies, Traefik config, backup CronJob, llm-gateway, platform")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("create", help="create (or repair) a hub and wait for it")
@@ -1285,7 +1486,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("archive")
     p.set_defaults(func=cmd_restore)
 
-    p = sub.add_parser("upgrade", help="roll the gateway and the hubs to the image in .env, one by one")
+    p = sub.add_parser("upgrade", help="roll the gateway, the platform and the hubs to the image in .env, one by one")
     p.add_argument("name", nargs="?", default="all")
     p.set_defaults(func=cmd_upgrade)
 

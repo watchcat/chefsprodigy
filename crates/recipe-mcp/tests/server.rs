@@ -1,6 +1,8 @@
 //! End-to-end MCP tests: a real rmcp client talks to the server over an in-memory pipe.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -8,7 +10,8 @@ use recipe_core::{IngredientItem, InstructionStep, MeasurementUnit, RecipeInput}
 use recipe_db::Db;
 use recipe_mcp::RecipeMcpServer;
 use recipe_scraper::images::ImageStore;
-use recipe_scraper::{HeuristicExtractor, RecipeImporter};
+use recipe_scraper::llm::{ExtractedRecipeDraft, RecipeExtractor};
+use recipe_scraper::{HeuristicExtractor, RecipeImporter, ScraperError};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult};
 use rmcp::service::{RoleClient, RunningService};
@@ -17,6 +20,10 @@ use serde_json::{Value, json};
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 async fn setup() -> (RunningService<RoleClient, ()>, Db) {
+    setup_with(Arc::new(HeuristicExtractor)).await
+}
+
+async fn setup_with(extractor: Arc<dyn RecipeExtractor>) -> (RunningService<RoleClient, ()>, Db) {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir: PathBuf =
         std::env::temp_dir().join(format!("recipe-mcp-test-{}-{n}", std::process::id()));
@@ -25,7 +32,7 @@ async fn setup() -> (RunningService<RoleClient, ()>, Db) {
     let server = RecipeMcpServer::new(
         db.clone(),
         // Stand-in sites run on loopback, which the SSRF guard refuses by default.
-        RecipeImporter::new(Arc::new(HeuristicExtractor)).allow_private_hosts(),
+        RecipeImporter::new(extractor).allow_private_hosts(),
         ImageStore::new(dir.join("images")),
     );
 
@@ -411,6 +418,51 @@ async fn import_recipe_from_jsonld_site_persists_recipe() {
             .await
             .unwrap()
             .is_some()
+    );
+    client.cancel().await.unwrap();
+}
+
+/// A model endpoint that refused for quota reasons (gateway 429).
+struct QuotaExhausted;
+
+impl RecipeExtractor for QuotaExhausted {
+    fn normalize_ingredients<'a>(
+        &'a self,
+        _raw: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<IngredientItem>, ScraperError>> + Send + 'a>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn extract_recipe<'a>(
+        &'a self,
+        _markdown: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<ExtractedRecipeDraft, ScraperError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(ScraperError::ModelQuotaExceeded(
+                "the model quota for this node is used up (daily quota of 10 requests used)".into(),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn import_recipe_reports_model_quota_exhaustion_readably() {
+    let (client, db) = setup_with(Arc::new(QuotaExhausted)).await;
+    let err = error_text(
+        &call(
+            &client,
+            "import_recipe",
+            json!({"raw_text": "Fry two eggs"}),
+        )
+        .await,
+    );
+    assert!(err.contains("quota"), "{err}");
+    assert!(err.contains("daily quota of 10 requests used"), "{err}");
+    assert!(
+        db.search_recipes(&Default::default())
+            .await
+            .unwrap()
+            .is_empty()
     );
     client.cancel().await.unwrap();
 }
