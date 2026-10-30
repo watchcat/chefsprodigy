@@ -3,6 +3,7 @@
 Run: python3 -I -m unittest discover -s deploy/tests
 """
 
+import base64
 import contextlib
 import hashlib
 import hmac
@@ -32,6 +33,9 @@ def load_hubctl():
 
 
 hubctl = load_hubctl()
+ORIGIN_CRT = base64.b64encode(b"-----BEGIN CERTIFICATE-----\norigin-ca-for-tests\n-----END CERTIFICATE-----\n").decode()
+ORIGIN_KEY = base64.b64encode(b"-----BEGIN PRIVATE KEY-----\norigin-key-for-tests\n-----END PRIVATE KEY-----\n").decode()
+MANAGED_BY_HUBCTL = {"app.kubernetes.io/managed-by": "hubctl"}
 
 
 class HubctlCase(unittest.TestCase):
@@ -92,17 +96,23 @@ class HubctlCase(unittest.TestCase):
     def obj(self, kind, ns, name):
         return self.objects()[f"{kind.lower()}/{ns}/{name}"]
 
-    def seed_origin_secret(self):
-        self.state.write_text(json.dumps({
-            "secret/kube-system/chefs-origin-tls": {"kind": "Secret", "metadata": {"name": "chefs-origin-tls", "namespace": "kube-system"}}
-        }))
+    def seed_origin_secret(self, crt=ORIGIN_CRT):
+        """The operator's step from deploy/README.md: the Origin CA certificate in chefs-system."""
+        state = self.raw_state()
+        state["secret/chefs-system/chefs-origin-tls"] = {
+            "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls",
+            "metadata": {"name": "chefs-origin-tls", "namespace": "chefs-system"},
+            "data": {"tls.crt": crt, "tls.key": ORIGIN_KEY},
+        }
+        self.state.write_text(json.dumps(state))
 
 
 class NameValidation(unittest.TestCase):
     def test_accepts_valid_subdomains_and_rejects_the_rest(self):
         for ok in ["jacob", "maria-2", "a", "x" * 63]:
             hubctl.validate_name(ok)
-        for bad in ["", "WWW", "-bad", "bad-", "a.b", "under_score", "x" * 64, "hub name", "www", "api", "gateway", "platform"]:
+        # `send` carries Resend's MX and TXT records, so the hub wildcard no longer covers it.
+        for bad in ["", "WWW", "-bad", "bad-", "a.b", "under_score", "x" * 64, "hub name", "www", "api", "gateway", "platform", "send"]:
             with self.assertRaises(hubctl.HubctlError, msg=bad):
                 hubctl.validate_name(bad)
 
@@ -124,11 +134,16 @@ class Init(HubctlCase):
         froms = json.dumps(ingress["spec"]["ingress"])
         self.assertIn("kube-system", froms, "Traefik may reach hubs")
         self.assertIn("chefs-system", froms, "the platform poller and the backup job may reach hubs")
+        system_deny = self.obj("NetworkPolicy", "chefs-system", "default-deny-ingress")
+        self.assertEqual(system_deny["spec"], {"podSelector": {}, "policyTypes": ["Ingress"]},
+                         "a new pod in chefs-system (the provisioner) starts closed")
         traefik = self.obj("HelmChartConfig", "kube-system", "traefik")
+        self.assertEqual(traefik["metadata"]["labels"], MANAGED_BY_HUBCTL, "the label the overwrite guard looks for")
         values = traefik["spec"]["valuesContent"]
         self.assertIn("173.245.48.0/20", values)
         self.assertIn("trustedIPs", values)
         self.assertRegex(values, r"access:\s*\n\s*enabled: false")
+        self.assertNotIn("redirections", values, "TLS_MODE=off serves plain http")
         self.assertNotIn("middleware/chefs-system/buffering", objs,
                          "Traefik's buffering middleware captures whole responses and stalls /mcp event streams")
         self.assertIn("middleware/chefs-system/headers", objs)
@@ -164,18 +179,79 @@ class Init(HubctlCase):
         self.assertIn("Traefik", out)
         self.assertIn("helm-install-traefik", out)
 
-    def test_origin_mode_needs_the_origin_ca_secret_and_installs_the_default_tls_store(self):
+    def test_origin_mode_needs_the_origin_ca_secret_in_chefs_system_and_copies_it_for_the_hubs(self):
         self.write_env(TLS_MODE="origin")
         code, out = self.run_hubctl("init")
-        self.assertNotEqual(code, 0)
-        self.assertIn("chefs-origin-tls", out)
+        self.assertEqual(code, 2, out)
+        self.assertIn("kubectl -n chefs-system create secret tls chefs-origin-tls", out)
         self.seed_origin_secret()
         code, out = self.run_hubctl("init")
         self.assertEqual(code, 0, out)
-        store = self.obj("TLSStore", "kube-system", "default")
-        self.assertEqual(store["spec"]["defaultCertificate"]["secretName"], "chefs-origin-tls")
+        copy = self.obj("Secret", "chefs-hubs", "chefs-origin-tls")
+        self.assertEqual(copy["type"], "kubernetes.io/tls")
+        self.assertEqual(copy["data"], {"tls.crt": ORIGIN_CRT, "tls.key": ORIGIN_KEY}, "hub Ingresses name it in their own namespace")
+        self.assertEqual(copy["metadata"]["labels"], MANAGED_BY_HUBCTL)
+        self.assertNotIn(ORIGIN_KEY, out)
+        self.assertNotIn("origin-key-for-tests", out, "the key is never printed")
+        self.assertFalse(any(k.startswith("tlsstore/") for k in self.objects()),
+                         "the cluster's default certificate stays Traefik's own: another site may share the node")
+
+        renewed = base64.b64encode(b"-----BEGIN CERTIFICATE-----\nrenewed\n-----END CERTIFICATE-----\n").decode()
+        self.seed_origin_secret(crt=renewed)
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.obj("Secret", "chefs-hubs", "chefs-origin-tls")["data"]["tls.crt"], renewed,
+                         "init again picks up a replaced certificate")
+
+    def test_origin_mode_rejects_a_secret_that_is_not_a_tls_pair(self):
+        self.write_env(TLS_MODE="origin")
+        self.seed_origin_secret()
+        state = self.raw_state()
+        del state["secret/chefs-system/chefs-origin-tls"]["data"]["tls.key"]
+        self.state.write_text(json.dumps(state))
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 2, out)
+        self.assertIn("tls.key", out)
+        self.assertNotIn("secret/chefs-hubs/chefs-origin-tls", self.objects())
+
+    def test_origin_mode_redirects_http_with_the_key_traefik_reads(self):
+        self.write_env(TLS_MODE="origin")
+        self.seed_origin_secret()
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
         values = self.obj("HelmChartConfig", "kube-system", "traefik")["spec"]["valuesContent"]
-        self.assertIn("redirectTo", values.replace("redirections", "redirectTo"), "web redirects to websecure")
+        # Traefik chart 40.1.4 (k3s v1.36.3 and v1.36.4) renders ports.web.http.redirections into
+        # --entryPoints.web.http.redirections.*; it silently ignores ports.web.redirections.
+        self.assertIn("  web:\n    http:\n      redirections:\n        entryPoint:\n"
+                      "          to: websecure\n          scheme: https\n          permanent: true\n", values)
+        if yaml:
+            web = yaml.safe_load(values)["ports"]["web"]
+            self.assertEqual(web["http"]["redirections"]["entryPoint"],
+                             {"to": "websecure", "scheme": "https", "permanent": True})
+            self.assertNotIn("redirections", web)
+
+    def test_init_refuses_to_replace_a_traefik_config_it_did_not_write(self):
+        foreign = {
+            "apiVersion": "helm.cattle.io/v1", "kind": "HelmChartConfig",
+            "metadata": {"name": "traefik", "namespace": "kube-system"},
+            "spec": {"valuesContent": "ports:\n  web:\n    redirectTo:\n      port: websecure\n"},
+        }
+        self.state.write_text(json.dumps({"helmchartconfig/kube-system/traefik": foreign}))
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 2, out)
+        self.assertIn("not written by hubctl", out)
+        self.assertIn("kubectl -n kube-system label helmchartconfig traefik app.kubernetes.io/managed-by=hubctl", out)
+        self.assertEqual(self.obj("HelmChartConfig", "kube-system", "traefik"), foreign, "left as it was")
+        self.assertEqual([c for c in self.calls() if c.startswith("apply")], [], "nothing is applied")
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 2, out)
+        self.assertNotIn("statefulset/chefs-hubs/hub-demo", self.objects(), "create stops at the same check")
+
+        foreign["metadata"]["labels"] = dict(MANAGED_BY_HUBCTL)  # the operator merged it and handed it over
+        self.state.write_text(json.dumps({"helmchartconfig/kube-system/traefik": foreign}))
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertIn("trustedIPs", self.obj("HelmChartConfig", "kube-system", "traefik")["spec"]["valuesContent"])
 
     def test_r2_settings_become_the_backup_secret(self):
         self.write_env(R2_BUCKET="chefs-backups", R2_ACCOUNT_ID="acc123", R2_ACCESS_KEY_ID="id", R2_SECRET_ACCESS_KEY="sec")
@@ -239,7 +315,8 @@ class Create(HubctlCase):
         code, out = self.run_hubctl("create", "demo")
         self.assertEqual(code, 0, out)
         ing = self.obj("Ingress", "chefs-hubs", "hub-demo")
-        self.assertEqual(ing["spec"]["tls"], [{"hosts": ["demo.example.test"]}])
+        self.assertEqual(ing["spec"]["tls"], [{"hosts": ["demo.example.test"], "secretName": "chefs-origin-tls"}],
+                         "the hub names its certificate instead of relying on a cluster-wide default")
         self.assertEqual(ing["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"], "websecure")
         self.assertEqual(self.obj("Secret", "chefs-hubs", "hub-demo-env")["stringData"]["NODE_PUBLIC_URL"], "https://demo.example.test")
 
@@ -651,7 +728,7 @@ class Platform(HubctlCase):
         code, out = self.run_hubctl("init")
         self.assertEqual(code, 0, out)
         ingress = self.obj("Ingress", "chefs-system", "platform")
-        self.assertEqual(ingress["spec"]["tls"], [{"hosts": ["example.test"]}])
+        self.assertEqual(ingress["spec"]["tls"], [{"hosts": ["example.test"], "secretName": "chefs-origin-tls"}])
         self.assertEqual(ingress["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"], "websecure")
 
     def test_admin_token_and_poll_settings_reach_the_platform_and_render_masks_the_token(self):
@@ -795,11 +872,15 @@ class Render(HubctlCase):
             self.assertEqual((out_dir / name).read_text(), checked_in.read_text(),
                              f"deploy/k8s/{name} is stale: run deploy/hubctl render --reference deploy/k8s")
         traefik = (out_dir / "traefik-config.yaml").read_text()
-        self.assertIn("kind: TLSStore", traefik, "the reference set is the production (origin TLS) shape")
-        self.assertIn("redirections", traefik)
+        self.assertNotIn("kind: TLSStore", traefik, "no cluster-wide default certificate")
+        self.assertRegex(traefik, r"web:\n\s+http:\n\s+redirections:", "the production (origin TLS) shape redirects")
+        self.assertIn("app.kubernetes.io/managed-by: hubctl", traefik)
+        policies = (out_dir / "network-policies.yaml").read_text()
+        self.assertIn("name: default-deny-ingress\n  namespace: chefs-system", policies)
         self.assertNotIn("buffering", traefik)
         hub = (out_dir / "hub.example.yaml").read_text()
         self.assertIn("jacob.chefslegacy.com", hub)
+        self.assertIn("secretName: chefs-origin-tls", hub)
         self.assertNotRegex(hub, r"[0-9a-f]{64}", "no real key in the example")
         backup = (out_dir / "backup-cronjob.yaml").read_text()
         self.assertNotIn("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY", backup, "no credentials in the reference set")

@@ -41,8 +41,15 @@ Keep the defaults: Traefik (the ingress on :80/:443 through ServiceLB), CoreDNS,
 local-path provisioner (`/var/lib/rancher/k3s/storage/`) and the network-policy controller
 are all used. Firewall at the **provider** (Hetzner Cloud Firewall, DigitalOcean firewall,
 …): allow 22 from your addresses, 80 and 443 only from [Cloudflare's ranges](https://www.cloudflare.com/ips/),
-nothing else (the k3s API on 6443 stays local; use SSH). Host firewalls such as ufw
-interact badly with kube-proxy's NAT rules, so prefer the provider's.
+nothing else (the k3s API on 6443 stays local; use SSH).
+
+A host firewall such as ufw **cannot** do the 80/443 part. ServiceLB publishes Traefik through
+host ports that are DNAT-ed to its pod in `PREROUTING`, so those packets never pass the host's
+`INPUT` chain, and in `FORWARD` kube-router accepts them before ufw's rules are reached (seen
+on a k3s v1.36.3 node: `iptables -t nat -S | grep CNI-HOSTPORT-DNAT`, `iptables -S FORWARD`).
+`ufw allow 443 from <Cloudflare range>` therefore changes nothing; ufw still guards SSH and
+other host ports. If the provider has no firewall, see section 2a for what still protects
+the hubs.
 
 Install the tool and its settings:
 
@@ -63,16 +70,66 @@ $EDITOR /srv/chefslegacy/.env          # DOMAIN, HUB_IMAGE, model access, later 
    `origin.key`, then on the node:
 
    ```sh
-   kubectl -n kube-system create secret tls chefs-origin-tls --cert=origin.pem --key=origin.key
+   kubectl create namespace chefs-system
+   kubectl -n chefs-system create secret tls chefs-origin-tls --cert=origin.pem --key=origin.key
    ```
 
-   `hubctl init` refuses to run in `TLS_MODE=origin` until this Secret exists; Traefik serves
-   it as the default certificate for every hostname.
+   Keep `origin.key` in a password manager rather than on the node's disk.
+   `hubctl init` refuses to run in `TLS_MODE=origin` until this Secret exists. It copies it
+   into `chefs-hubs` (an Ingress can only name a Secret in its own namespace), and the apex
+   and every hub `Ingress` name it, so Traefik's default certificate for other hostnames on
+   the node stays its own. To replace the certificate, recreate the Secret in `chefs-system`
+   and run `hubctl init` again.
 4. Optional but recommended: a WAF rate-limiting rule for `/api/v1/auth/*` and `/mcp`, and a
    firewall rule that challenges countries you do not serve.
+5. **Email** (Resend, for the platform's mail outbox from RN-71 on): add the domain in
+   Resend and create the records it lists in this zone, all *DNS only*: usually an `MX` and
+   an SPF `TXT` on `send.chefslegacy.com`, a DKIM `TXT` on `resend._domainkey`, and a DMARC
+   `TXT` on `_dmarc` (for example `v=DMARC1; p=none; rua=mailto:<you>`). `send` is a reserved
+   hub name: once it has its own records the `*.chefslegacy.com` wildcard no longer covers
+   it, so a hub there would have no address. Create an API key restricted to sending from
+   this domain; if another project uses the same Resend account, check the plan's domain
+   limit and keep one key per domain.
 
 Cloudflare's proxy caps request bodies at 100 MB on the free plan and closes connections
 that stay silent for 100 s; MCP clients reconnect using the `retry` hint the hub sends.
+
+## 2a. Sharing the node with another site
+
+The node may already run something else, for example a site in its own namespace with
+cert-manager and Let's Encrypt. hubctl keeps to `chefs-system` and `chefs-hubs`, with
+three exceptions that reach every site on the node:
+
+- **Traefik's `HelmChartConfig`** (`kube-system/traefik`, one per node): trusts Cloudflare's
+  ranges for the client address on `websecure`, turns Traefik's access log off, and in
+  `TLS_MODE=origin` answers every plain-http request with a permanent redirect to https, for
+  the other site's hostnames as well. A Let's Encrypt HTTP-01 check still passes, because
+  Let's Encrypt follows the redirect and does not validate the certificate on the way
+  (checked in k3d with a cert-manager-style solver `Ingress`). hubctl only replaces a
+  `HelmChartConfig` it wrote (label `app.kubernetes.io/managed-by=hubctl`); if `init` finds
+  another one it stops before applying anything. Compare it with `hubctl render all`, make
+  sure nothing the other site needs is lost, then hand it over:
+  `kubectl -n kube-system label helmchartconfig traefik app.kubernetes.io/managed-by=hubctl`.
+- **Ports 80 and 443** belong to Traefik for everyone; routing is by hostname.
+- **The node's firewall.** Limiting 80/443 to Cloudflare at the provider would also cut off
+  a site that is reached directly (grey cloud), including its Let's Encrypt renewals, so do
+  that only once every hostname on the node is proxied by Cloudflare. As section 1 explains,
+  ufw cannot do it at all.
+
+Untouched: the default certificate (no `TLSStore`; each of hubctl's `Ingresses` names
+`chefs-origin-tls`), cert-manager, other namespaces. `chefs-hubs` denies all traffic except
+the paths in section 7, and `chefs-system` denies ingress by default, opening only the
+gateway (to hubs) and the platform (to Traefik); a pod in another namespace reaches neither,
+nor a hub, and hubs cannot reach the other site because their egress excludes private
+addresses (all checked in k3d for RN-76).
+
+Without a provider firewall the node's address stays reachable directly, and if the other
+site is DNS-only its address is public anyway. Requests for a chefs hostname that bypass
+Cloudflare then reach Traefik directly; Cloudflare's WAF and rate limits do not apply to
+them. Moving the other site behind Cloudflare too means moving its zone's nameservers to
+Cloudflare: copy every record first (mail `MX`, SPF, DKIM, inbound-mail `MX`), keep the mail
+records *DNS only*, and reach the node over SSH by its IP from then on, since its hostname
+will resolve to Cloudflare.
 
 ## 3. Bring the cluster up and create the first hub
 
@@ -83,10 +140,12 @@ hubctl create jacob --chef "Jacob"
 ```
 
 `init` is idempotent and creates: the `chefs-system` and `chefs-hubs` namespaces; the
-default-deny `NetworkPolicy` set in `chefs-hubs`; Traefik's `HelmChartConfig` (trusts
-Cloudflare's ranges for the visitor IP, redirects http to https, access logs off because the
-magic-link token travels in a query string), the `headers` middleware and the default
-`TLSStore`; the backup `CronJob` with its `ServiceAccount` and `Role`; and, when `.env` has a
+default-deny `NetworkPolicy` set in `chefs-hubs` and a default deny for ingress in
+`chefs-system`; Traefik's `HelmChartConfig` (trusts Cloudflare's ranges for the visitor IP,
+redirects http to https, access logs off because the magic-link token travels in a query
+string; see section 2a when the node hosts another site), the `headers` middleware and,
+in `TLS_MODE=origin`, the copy of `chefs-origin-tls` in `chefs-hubs`; the backup `CronJob`
+with its `ServiceAccount` and `Role`; and, when `.env` has a
 vendor key, the `llm-gateway` (next paragraph). `create` prints the
 owner key **once**, then a sign-in link; store the key in a password manager and send the
 link to the owner. Check the hub from outside:
@@ -315,7 +374,9 @@ remove behave as described.
 |---------|---------|
 | `create` reports *not ready yet* | `kubectl -n chefs-hubs describe pod hub-<name>-0`, then `logs`; a missing image tag or a volume that cannot be provisioned show up there |
 | 404 from Traefik for a hostname | `kubectl -n chefs-hubs get ingress`; the host must be `<name>.<DOMAIN>` and DNS must point at the node |
-| Certificate errors behind Cloudflare | Secret `chefs-origin-tls` in `kube-system`, Cloudflare mode *Full (strict)*, `kubectl -n kube-system get tlsstore default` |
+| Certificate errors behind Cloudflare | Secret `chefs-origin-tls` in `chefs-system` and its copy in `chefs-hubs` (`hubctl init` refreshes it), `tls.secretName` on the `Ingress`, Cloudflare mode *Full (strict)* |
+| http is not redirected to https | `kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.template.spec.containers[0].args}'` should contain `--entryPoints.web.http.redirections.entryPoint.to=:443`; the chart reads `ports.web.http.redirections`, not `ports.web.redirections` |
+| `init` stops at *was not written by hubctl* | another site's Traefik settings; section 2a |
 | Traefik ignores the Cloudflare ranges | `kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.template.spec.containers[0].args}'` should list them; `kubectl -n kube-system logs job/helm-install-traefik` shows chart errors |
 | Backup job fails | `hubctl backup all` prints the log; `kubectl -n chefs-system get jobs` lists past runs |
 | Hub cannot call the model | `kubectl -n chefs-hubs logs hub-<name>-0`; then `kubectl -n chefs-system logs deploy/llm-gateway`. A 401 there means the hub's token is unknown: `hubctl gateway-token <name>` |

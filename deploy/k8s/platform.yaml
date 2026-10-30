@@ -181,6 +181,7 @@ spec:
   tls:
     - hosts:
         - chefslegacy.com
+      secretName: chefs-origin-tls
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

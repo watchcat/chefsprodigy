@@ -153,3 +153,4 @@ spec:
   tls:
     - hosts:
         - jacob.chefslegacy.com
+      secretName: chefs-origin-tls

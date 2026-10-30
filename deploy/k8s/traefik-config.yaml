@@ -6,15 +6,19 @@ kind: HelmChartConfig
 metadata:
   name: traefik
   namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: hubctl
 spec:
   valuesContent: |
-    # Rendered by hubctl: Cloudflare fronts every hostname.
+    # Rendered by hubctl for every site on the node (Cloudflare fronts chefs hostnames).
     ports:
       web:
-        redirections:
-          entryPoint:
-            to: websecure
-            scheme: https
+        http:
+          redirections:
+            entryPoint:
+              to: websecure
+              scheme: https
+              permanent: true
       websecure:
         forwardedHeaders:
           trustedIPs:
@@ -54,12 +58,3 @@ spec:
     frameDeny: true
     contentTypeNosniff: true
     referrerPolicy: strict-origin-when-cross-origin
----
-apiVersion: traefik.io/v1alpha1
-kind: TLSStore
-metadata:
-  name: default
-  namespace: kube-system
-spec:
-  defaultCertificate:
-    secretName: chefs-origin-tls

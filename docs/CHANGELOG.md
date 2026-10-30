@@ -2,6 +2,11 @@
 
 Stories moved out of the Kanban `Done` column, newest first. Ids are never reused.
 
+## Archived 2026-10-30
+
+### RN-54 · Backend: translation store and service (M)
+`recipe_translations` + `translations_fts` (triggers) + `canonical_terms` tables; `TranslationService` translates lazily on `GET /recipes/{id}?lang=` (or `Accept-Language`), caches per language, coalesces concurrent requests, regenerates stale machine translations, keeps human ones (`PUT/DELETE /recipes/{id}/translations/{lang}`), validates reply lengths and falls back to the source on failure. `GET /i18n/languages`. 20 new tests.
+
 ## Archived 2026-10-28
 
 ### RN-52 · Fix editor heading collapsing to one letter per line (S)
