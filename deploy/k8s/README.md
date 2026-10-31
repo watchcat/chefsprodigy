@@ -1,8 +1,8 @@
 # deploy/k8s: reference manifests
 
 These files are **generated** by `deploy/hubctl render --reference deploy/k8s` with example
-settings (`DOMAIN=chefslegacy.com`, `TLS_MODE=origin`, no credentials). They exist so the
-cluster's shape can be reviewed in a pull request; the live cluster gets the same objects
+settings (`DOMAIN=chefslegacy.com`, `TLS_MODE=origin`, `ORIGIN_PULLS=on`, no credentials).
+They exist so the cluster's shape can be reviewed in a pull request; the live cluster gets the same objects
 from `hubctl init` (namespaces, network policies, Traefik config, backup CronJob) and
 `hubctl create <name>` (one Secret, StatefulSet, Service and Ingress per hub).
 
@@ -10,7 +10,7 @@ from `hubctl init` (namespaces, network policies, Traefik config, backup CronJob
 |------|---------|
 | `namespaces.yaml` | `chefs-system`, `chefs-hubs` |
 | `network-policies.yaml` | default deny in `chefs-hubs` and for ingress in `chefs-system`; hubs accept Traefik (`kube-system`) and `role=hub-client` pods in `chefs-system`; hubs reach DNS, public addresses and `llm-gateway` only |
-| `traefik-config.yaml` | `HelmChartConfig traefik` labelled `app.kubernetes.io/managed-by=hubctl` (Cloudflare trusted IPs, http→https redirect, access logs off), `Middleware headers`; no `TLSStore`: every `Ingress` names `Secret chefs-origin-tls` |
+| `traefik-config.yaml` | `HelmChartConfig traefik` labelled `app.kubernetes.io/managed-by=hubctl` (Cloudflare trusted IPs, http→https redirect, access logs off), `Middleware headers`, `TLSOption origin-pull` (requires a client certificate from the CA in `Secret chefs-origin-pull-ca`, which the operator creates); no `TLSStore`: every `Ingress` names `Secret chefs-origin-tls` and the `origin-pull` option |
 | `backup-cronjob.yaml` | `ServiceAccount hub-backup`, `Role`/`RoleBinding` to read hub Secrets, the fetch/upload scripts, `CronJob hub-backup` (rclone → R2) |
 | `platform.yaml` | `Secret platform-env` (admin token placeholder), `PVC platform-data`, `Deployment platform` (pods labelled `role=hub-client` for the poller), `Service`, apex `Ingress` for `chefslegacy.com` routing only `/api/v1/search`, `/api/v1/hubs` and `/health`, `NetworkPolicy platform-ingress` (Traefik only) |
 | `hub.example.yaml` | what `hubctl render jacob` prints before the hub exists: placeholder key, `https://jacob.chefslegacy.com` |

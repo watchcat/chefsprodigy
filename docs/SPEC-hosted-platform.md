@@ -31,7 +31,7 @@ becomes optional.
 | Topic | Decision | Alternative kept open |
 |---|---|---|
 | Hosting | One VPS (4 GB, 2 vCPU class), Ubuntu LTS, single-node k3s (embedded containerd, Traefik, local-path storage, ServiceLB) | Fly.io machines with the same image; a second k3s node when one is full |
-| Edge | Cloudflare proxied (orange cloud) for apex and `*.chefslegacy.com`; Origin CA wildcard cert named by every chefs `Ingress` (no cluster-wide default: the node may host other sites); the provider's firewall allows 443 only from Cloudflare IPs (a host firewall such as ufw cannot filter ServiceLB's ports) | DNS-only with cert-manager and ACME DNS-01 |
+| Edge | Cloudflare proxied (orange cloud) for apex and `*.chefslegacy.com`; Origin CA wildcard cert named by every chefs `Ingress` (no cluster-wide default: the node may host other sites); Authenticated Origin Pulls: Traefik completes TLS for chefs hostnames only with Cloudflare's client certificate (`ORIGIN_PULLS=on`), since a host firewall such as ufw cannot filter ServiceLB's ports; the provider's firewall, where there is one, allows 443 only from Cloudflare IPs | DNS-only with cert-manager and ACME DNS-01 |
 | Routing | k3s's bundled Traefik; one `Ingress` per hub and one for the apex; Traefik middlewares for body limits and headers | ingress-nginx |
 | Isolation | Namespaces `chefs-system` (gateway, platform, provisioner, backups) and `chefs-hubs` (one `StatefulSet` per hub); default-deny `NetworkPolicy` in `chefs-hubs`, hubs reach only DNS, the public internet and the gateway; default deny for ingress in `chefs-system`, opened per pod | |
 | Hub image | `ghcr.io/watchcat/chefsprodigy:<version>`, distroless, non-root, `/data` volume, no shell tools; health through kubelet `httpGet` probes plus `node-server healthcheck` for `docker run` and debugging | |
@@ -48,11 +48,12 @@ becomes optional.
                 Internet
                    │
         Cloudflare: DNS, wildcard TLS, WAF, rate-limit rules, hides VPS IP
-                   │  (provider firewall: only Cloudflare ranges may reach :443)
+                   │  (client certificate: Authenticated Origin Pulls; provider firewall where available)
    ────────────────┼──────────────────────────── VPS: single-node k3s ──────────
                    ▼
    kube-system     Traefik (ServiceLB on :443; chefs Ingresses name the Origin CA wildcard
-                   Secret; trusts Cloudflare ranges for the client IP; routes by Ingress host)
+                   Secret and the origin-pull TLSOption; trusts Cloudflare ranges for the
+                   client IP; routes by Ingress host)
                      chefslegacy.com        → platform.chefs-system:8080
                      jacob.chefslegacy.com  → hub-jacob.chefs-hubs:8080
                      maria.chefslegacy.com  → hub-maria.chefs-hubs:8080
@@ -477,6 +478,18 @@ k3s installs Traefik; it is configured through a `HelmChartConfig` in `kube-syst
   certificate for `chefslegacy.com` and `*.chefslegacy.com` (15 years), copied by `hubctl
   init` into `chefs-hubs`; the apex and every hub `Ingress` name it (`tls.secretName`), and
   Traefik's default certificate stays its own. Cloudflare SSL mode "Full (strict)".
+- Authenticated Origin Pulls (`ORIGIN_PULLS=on`): `TLSOption origin-pull` in `chefs-system`
+  with `clientAuth` `RequireAndVerifyClientCert` against `Secret chefs-origin-pull-ca`
+  (`ca.crt`, created by the operator: Cloudflare's global AOP certificate or the zone's own
+  CA). The apex and every hub `Ingress` name it
+  (`traefik.ingress.kubernetes.io/router.tls.options: chefs-system-origin-pull@kubernetescrd`),
+  one option for all of them, so Traefik's SNI check accepts a connection that carries
+  another chefs hostname in its `Host` header. Direct requests for a chefs hostname fail the
+  handshake; a chefs `Host` header behind another server name, or none, gets 421. Other
+  sites keep Traefik's default TLS options. Traefik reads the option and the Ingresses
+  through separate, throttled providers, so `hubctl init` waits 10 s after creating the option
+  before an Ingress names it, and after the last Ingress stops naming it before deleting it
+  (without that wait the routes dropped out for a moment in k3d: "unknown TLS options").
 - One Middleware in `chefs-system`, referenced by annotation from every hub `Ingress` and the
   apex: `headers` (frame deny, nosniff, referrer policy). No `buffering` middleware: Traefik's
   buffering captures the whole response before forwarding it and held back the `/mcp` event
@@ -556,7 +569,8 @@ metadata:
   name: hub-{{name}}
   namespace: chefs-hubs
   annotations: {traefik.ingress.kubernetes.io/router.entrypoints: websecure,
-                traefik.ingress.kubernetes.io/router.middlewares: chefs-system-headers@kubernetescrd}
+                traefik.ingress.kubernetes.io/router.middlewares: chefs-system-headers@kubernetescrd,
+                traefik.ingress.kubernetes.io/router.tls.options: chefs-system-origin-pull@kubernetescrd}
 spec:
   tls: [{hosts: ["{{name}}.chefslegacy.com"], secretName: chefs-origin-tls}]
   rules:
@@ -571,6 +585,9 @@ spec:
   bound to localhost and reached through SSH. Fail2ban on SSH. A host firewall cannot take the
   provider's place for 80/443: ServiceLB's host ports are DNAT-ed in `PREROUTING` and
   accepted by kube-router in `FORWARD` before ufw's rules (seen on the production node).
+  Authenticated Origin Pulls (§5.5) close that gap for chefs hostnames without a firewall:
+  without Cloudflare's client certificate the apex and the hubs are unreachable, so the WAF
+  and rate limits cannot be skipped by calling the node's address.
 - Namespace isolation: `chefs-hubs` is default-deny. A hub accepts ingress from Traefik
   (`kube-system`) and from the platform (the poller) and may egress to DNS, to public
   addresses and to `llm-gateway.chefs-system`. It cannot reach other hubs, the platform, the

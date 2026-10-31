@@ -4,6 +4,10 @@ Stories moved out of the Kanban `Done` column, newest first. Ids are never reuse
 
 ## Archived 2026-10-30
 
+### RN-58 · UI: message bundles and language switcher (M)
+The embedded PWA now ships parity-checked `en`, `ru`, and `nl` message bundles, with bundle-backed static UI text, an English fallback, and a header switcher persisted in `localStorage["ui.lang"]`. The active language updates `<html lang>` and drives `Intl` number, unit, duration, and timer formatting; the static PWA shell caches all three bundles.
+- Verified in-browser 2026-10-24 via `scripts/devbuild.sh`: the switcher changed the live library from English to Russian and Dutch, set `html[lang]` to `ru`/`nl`, persisted through a reload, and returned to unchanged English. `scripts/i18n-check.py` passed bundle parity and renderer-string checks.
+
 ### RN-54 · Backend: translation store and service (M)
 `recipe_translations` + `translations_fts` (triggers) + `canonical_terms` tables; `TranslationService` translates lazily on `GET /recipes/{id}?lang=` (or `Accept-Language`), caches per language, coalesces concurrent requests, regenerates stale machine translations, keeps human ones (`PUT/DELETE /recipes/{id}/translations/{lang}`), validates reply lengths and falls back to the source on failure. `GET /i18n/languages`. 20 new tests.
 

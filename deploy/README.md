@@ -48,8 +48,8 @@ host ports that are DNAT-ed to its pod in `PREROUTING`, so those packets never p
 `INPUT` chain, and in `FORWARD` kube-router accepts them before ufw's rules are reached (seen
 on a k3s v1.36.3 node: `iptables -t nat -S | grep CNI-HOSTPORT-DNAT`, `iptables -S FORWARD`).
 `ufw allow 443 from <Cloudflare range>` therefore changes nothing; ufw still guards SSH and
-other host ports. If the provider has no firewall, see section 2a for what still protects
-the hubs.
+other host ports. Without a provider firewall, Authenticated Origin Pulls (section 2, step 4)
+keep direct requests away from the apex and the hubs.
 
 Install the tool and its settings:
 
@@ -80,9 +80,54 @@ $EDITOR /srv/chefslegacy/.env          # DOMAIN, HUB_IMAGE, model access, later 
    and every hub `Ingress` name it, so Traefik's default certificate for other hostnames on
    the node stays its own. To replace the certificate, recreate the Secret in `chefs-system`
    and run `hubctl init` again.
-4. Optional but recommended: a WAF rate-limiting rule for `/api/v1/auth/*` and `/mcp`, and a
+4. **SSL/TLS → Origin Server → Authenticated Origin Pulls**: Cloudflare then shows a client
+   certificate on every request to the node, and with `ORIGIN_PULLS=on` (the template's
+   value) Traefik completes TLS for the apex and the hubs only when it sees one. A request
+   sent straight to the node's address, which ufw cannot stop (section 1), fails the
+   handshake, and one that names a chefs hostname only in its `Host` header gets
+   `421 Misdirected Request`. Pick one variant and store its CA in `chefs-system`:
+
+   - **Global**, Cloudflare's certificate: switch *Global* on, then
+     ```sh
+     curl -fsSo aop-ca.pem https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem
+     kubectl -n chefs-system create secret generic chefs-origin-pull-ca --from-file=ca.crt=aop-ca.pem
+     ```
+     Every Cloudflare customer's requests carry that certificate: it proves a request came
+     through Cloudflare, not through this zone, so somebody else's zone pointed at the node's
+     address still gets in, without this zone's WAF rules.
+   - **Zone-level**, a certificate of your own that only this zone sends: create a CA and a
+     client certificate signed by it, upload `aop-client.pem` with `aop-client.key` under
+     *Zone-level*, switch it on, and store the CA (not the client certificate):
+     ```sh
+     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=chefslegacy.com origin pull CA" \
+       -keyout aop-ca.key -out aop-ca.pem
+     openssl req -newkey rsa:2048 -nodes -subj "/CN=Cloudflare origin pull" -keyout aop-client.key -out aop-client.csr
+     printf 'extendedKeyUsage=clientAuth\n' > aop-client.ext
+     openssl x509 -req -in aop-client.csr -CA aop-ca.pem -CAkey aop-ca.key -CAcreateserial -days 1825 \
+       -extfile aop-client.ext -out aop-client.pem
+     kubectl -n chefs-system create secret generic chefs-origin-pull-ca --from-file=ca.crt=aop-ca.pem
+     ```
+     Keep `aop-ca.key` and `aop-client.key` in the password manager, not on the node. The
+     client certificate lasts five years; Cloudflare can alert 30 and 14 days before it
+     expires, and a renewed one is uploaded the same way.
+
+   Order matters. Switch Cloudflare on before `hubctl init` runs with `ORIGIN_PULLS=on`: a node
+   that asks for the certificate before Cloudflare sends one shows every visitor Cloudflare's
+   52x error page. To turn it off, set `ORIGIN_PULLS=off` and run `hubctl init` first (it waits
+   10 s for Traefik before removing the option), then switch Cloudflare off. `init` refuses `ORIGIN_PULLS=on` until the Secret holds a PEM
+   certificate under `ca.crt`, and every run brings existing hubs' `Ingresses` in line with
+   `.env`. From any machine, with the node's address in `$IP`:
+
+   ```sh
+   curl -sS https://jacob.chefslegacy.com/api/v1/health            # 200, through Cloudflare
+   curl -sS --resolve jacob.chefslegacy.com:443:$IP https://jacob.chefslegacy.com/api/v1/health
+   #   curl: (56) ... alert certificate required (TLS alert 116): no client certificate
+   curl -sk -o /dev/null -w '%{http_code}\n' -H 'Host: jacob.chefslegacy.com' https://$IP/api/v1/health
+   #   421: a chefs Host header without the matching server name
+   ```
+5. Optional but recommended: a WAF rate-limiting rule for `/api/v1/auth/*` and `/mcp`, and a
    firewall rule that challenges countries you do not serve.
-5. **Email** (Resend, for the platform's mail outbox from RN-71 on): add the domain in
+6. **Email** (Resend, for the platform's mail outbox from RN-71 on): add the domain in
    Resend and create the records it lists in this zone, all *DNS only*: usually an `MX` and
    an SPF `TXT` on `send.chefslegacy.com`, a DKIM `TXT` on `resend._domainkey`, and a DMARC
    `TXT` on `_dmarc` (for example `v=DMARC1; p=none; rua=mailto:<you>`). `send` is a reserved
@@ -116,8 +161,10 @@ three exceptions that reach every site on the node:
   that only once every hostname on the node is proxied by Cloudflare. As section 1 explains,
   ufw cannot do it at all.
 
-Untouched: the default certificate (no `TLSStore`; each of hubctl's `Ingresses` names
-`chefs-origin-tls`), cert-manager, other namespaces. `chefs-hubs` denies all traffic except
+Untouched: the default certificate and the default TLS options (no `TLSStore`, no
+`TLSOption` named `default`; each of hubctl's `Ingresses` names `chefs-origin-tls` and, with
+`ORIGIN_PULLS=on`, the `origin-pull` option), cert-manager, other namespaces. The other
+site's hostnames need no client certificate. `chefs-hubs` denies all traffic except
 the paths in section 7, and `chefs-system` denies ingress by default, opening only the
 gateway (to hubs) and the platform (to Traefik); a pod in another namespace reaches neither,
 nor a hub, and hubs cannot reach the other site because their egress excludes private
@@ -125,9 +172,10 @@ addresses (all checked in k3d for RN-76).
 
 Without a provider firewall the node's address stays reachable directly, and if the other
 site is DNS-only its address is public anyway. Requests for a chefs hostname that bypass
-Cloudflare then reach Traefik directly; Cloudflare's WAF and rate limits do not apply to
-them. Moving the other site behind Cloudflare too means moving its zone's nameservers to
-Cloudflare: copy every record first (mail `MX`, SPF, DKIM, inbound-mail `MX`), keep the mail
+Cloudflare then reach Traefik directly, where Cloudflare's WAF and rate limits do not apply:
+with `ORIGIN_PULLS=on` Traefik turns them away (section 2, step 4), without it they reach the
+apex and the hubs. Moving the other site behind Cloudflare too means moving its zone's
+nameservers to Cloudflare: copy every record first (mail `MX`, SPF, DKIM, inbound-mail `MX`), keep the mail
 records *DNS only*, and reach the node over SSH by its IP from then on, since its hostname
 will resolve to Cloudflare.
 
@@ -144,9 +192,10 @@ default-deny `NetworkPolicy` set in `chefs-hubs` and a default deny for ingress 
 `chefs-system`; Traefik's `HelmChartConfig` (trusts Cloudflare's ranges for the visitor IP,
 redirects http to https, access logs off because the magic-link token travels in a query
 string; see section 2a when the node hosts another site), the `headers` middleware and,
-in `TLS_MODE=origin`, the copy of `chefs-origin-tls` in `chefs-hubs`; the backup `CronJob`
-with its `ServiceAccount` and `Role`; and, when `.env` has a
-vendor key, the `llm-gateway` (next paragraph). `create` prints the
+in `TLS_MODE=origin`, the copy of `chefs-origin-tls` in `chefs-hubs`; with `ORIGIN_PULLS=on`
+the `origin-pull` `TLSOption` (section 2, step 4), and every existing hub's `Ingress` again so
+it follows `.env`; the backup `CronJob` with its `ServiceAccount` and `Role`; and, when `.env`
+has a vendor key, the `llm-gateway` (next paragraph). `create` prints the
 owner key **once**, then a sign-in link; store the key in a password manager and send the
 link to the owner. Check the hub from outside:
 
@@ -377,6 +426,8 @@ remove behave as described.
 | Certificate errors behind Cloudflare | Secret `chefs-origin-tls` in `chefs-system` and its copy in `chefs-hubs` (`hubctl init` refreshes it), `tls.secretName` on the `Ingress`, Cloudflare mode *Full (strict)* |
 | http is not redirected to https | `kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.template.spec.containers[0].args}'` should contain `--entryPoints.web.http.redirections.entryPoint.to=:443`; the chart reads `ports.web.http.redirections`, not `ports.web.redirections` |
 | `init` stops at *was not written by hubctl* | another site's Traefik settings; section 2a |
+| Cloudflare shows a 52x error page after `ORIGIN_PULLS=on` | Authenticated Origin Pulls must be on for the zone in Cloudflare, and `chefs-origin-pull-ca` must hold the CA of the variant in use (Cloudflare's for *Global*, your own for *Zone-level*); `ORIGIN_PULLS=off` and `hubctl init` restore access within seconds (section 2, step 4) |
+| `421 Misdirected Request` | the TLS server name (SNI) and the `Host` header disagree about a chefs hostname: expected for direct requests to the node's address with `ORIGIN_PULLS=on`; a client that sends both correctly is not affected |
 | Traefik ignores the Cloudflare ranges | `kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.template.spec.containers[0].args}'` should list them; `kubectl -n kube-system logs job/helm-install-traefik` shows chart errors |
 | Backup job fails | `hubctl backup all` prints the log; `kubectl -n chefs-system get jobs` lists past runs |
 | Hub cannot call the model | `kubectl -n chefs-hubs logs hub-<name>-0`; then `kubectl -n chefs-system logs deploy/llm-gateway`. A 401 there means the hub's token is unknown: `hubctl gateway-token <name>` |

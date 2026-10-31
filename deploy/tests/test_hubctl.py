@@ -36,6 +36,9 @@ hubctl = load_hubctl()
 ORIGIN_CRT = base64.b64encode(b"-----BEGIN CERTIFICATE-----\norigin-ca-for-tests\n-----END CERTIFICATE-----\n").decode()
 ORIGIN_KEY = base64.b64encode(b"-----BEGIN PRIVATE KEY-----\norigin-key-for-tests\n-----END PRIVATE KEY-----\n").decode()
 MANAGED_BY_HUBCTL = {"app.kubernetes.io/managed-by": "hubctl"}
+PULL_CA = base64.b64encode(b"-----BEGIN CERTIFICATE-----\norigin-pull-ca-for-tests\n-----END CERTIFICATE-----\n").decode()
+TLS_OPTIONS = "traefik.ingress.kubernetes.io/router.tls.options"
+PULL_OPTIONS = "chefs-system-origin-pull@kubernetescrd"
 
 
 class HubctlCase(unittest.TestCase):
@@ -54,9 +57,11 @@ class HubctlCase(unittest.TestCase):
         }
         self.saved = {k: os.environ.get(k) for k in self.env_patch}
         os.environ.update(self.env_patch)
+        self.saved_settle, hubctl.TRAEFIK_SETTLE_SECONDS = hubctl.TRAEFIK_SETTLE_SECONDS, 0
         self.write_env()
 
     def tearDown(self):
+        hubctl.TRAEFIK_SETTLE_SECONDS = self.saved_settle
         for k, v in self.saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -105,6 +110,22 @@ class HubctlCase(unittest.TestCase):
             "data": {"tls.crt": crt, "tls.key": ORIGIN_KEY},
         }
         self.state.write_text(json.dumps(state))
+
+    def seed_origin_pull_ca(self, data=None):
+        """The operator's step for ORIGIN_PULLS=on: the CA of Cloudflare's client certificate."""
+        state = self.raw_state()
+        state["secret/chefs-system/chefs-origin-pull-ca"] = {
+            "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+            "metadata": {"name": "chefs-origin-pull-ca", "namespace": "chefs-system"},
+            "data": {"ca.crt": PULL_CA} if data is None else data,
+        }
+        self.state.write_text(json.dumps(state))
+
+    def apply_index(self, object_key):
+        """Position in the call log of the last `apply` that carried this object."""
+        hits = [i for i, c in enumerate(self.calls()) if c.startswith("apply") and object_key in c.split(" # ", 1)[-1].split()]
+        self.assertTrue(hits, f"{object_key} was never applied: {self.calls()}")
+        return hits[-1]
 
 
 class NameValidation(unittest.TestCase):
@@ -252,6 +273,102 @@ class Init(HubctlCase):
         code, out = self.run_hubctl("init")
         self.assertEqual(code, 0, out)
         self.assertIn("trustedIPs", self.obj("HelmChartConfig", "kube-system", "traefik")["spec"]["valuesContent"])
+
+    def test_origin_pulls_need_tls_and_a_known_value(self):
+        self.write_env(ORIGIN_PULLS="on")
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 2, out)
+        self.assertIn("TLS_MODE=origin", out, "the client certificate is checked in the TLS handshake")
+        self.write_env(TLS_MODE="origin", ORIGIN_PULLS="yes")
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 2, out)
+        self.assertIn("ORIGIN_PULLS must be 'on'", out)
+        self.assertEqual([c for c in self.calls() if c.startswith("apply")], [], "nothing is applied")
+
+    def test_origin_pulls_need_the_ca_secret_and_put_a_client_certificate_check_on_every_chefs_ingress(self):
+        self.write_env(TLS_MODE="origin", ORIGIN_PULLS="on")
+        self.seed_origin_secret()
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 2, out)
+        self.assertIn("kubectl -n chefs-system create secret generic chefs-origin-pull-ca --from-file=ca.crt=", out)
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 2, out)
+        objs = self.objects()
+        self.assertFalse(any(k.startswith(("tlsoption/", "ingress/")) for k in objs), "stops before Traefik sees anything")
+
+        self.seed_origin_pull_ca()
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertIn("origin pulls: on", out)
+        option = self.obj("TLSOption", "chefs-system", "origin-pull")
+        self.assertEqual(option["apiVersion"], "traefik.io/v1alpha1")
+        self.assertEqual(option["spec"], {"clientAuth": {"secretNames": ["chefs-origin-pull-ca"],
+                                                         "clientAuthType": "RequireAndVerifyClientCert"}})
+        self.assertNotIn("clientAuth", self.obj("HelmChartConfig", "kube-system", "traefik")["spec"]["valuesContent"],
+                         "nothing node-wide: other sites keep Traefik's default TLS options")
+        self.assertEqual(self.obj("Ingress", "chefs-system", "platform")["metadata"]["annotations"][TLS_OPTIONS], PULL_OPTIONS)
+        self.assertNotIn("origin-pull-ca-for-tests", out)
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.obj("Ingress", "chefs-hubs", "hub-demo")["metadata"]["annotations"][TLS_OPTIONS], PULL_OPTIONS,
+                         "one TLSOption in chefs-system for the apex and the hubs")
+
+    def test_origin_pulls_reject_a_ca_secret_without_a_pem_certificate(self):
+        self.write_env(TLS_MODE="origin", ORIGIN_PULLS="on")
+        self.seed_origin_secret()
+        for data in ({"ca.crt": ORIGIN_KEY}, {"tls.crt": PULL_CA}, {"ca.crt": "not base64!"}):
+            self.seed_origin_pull_ca(data)
+            code, out = self.run_hubctl("init")
+            self.assertEqual(code, 2, (data, out))
+            self.assertIn("no PEM certificate under ca.crt", out)
+            self.assertNotIn("origin-key-for-tests", out)
+            self.assertNotIn("tlsoption/chefs-system/origin-pull", self.objects())
+
+    def test_init_switches_existing_hubs_and_never_leaves_an_ingress_naming_a_missing_option(self):
+        settle = hubctl.settle_traefik
+        hubctl.settle_traefik = lambda: self.log.open("a").write("settle\n")  # marks the wait in the call log
+        self.addCleanup(setattr, hubctl, "settle_traefik", settle)
+        self.write_env(TLS_MODE="origin")
+        self.seed_origin_secret()
+        self.seed_origin_pull_ca()
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertIn("origin pulls: off", out, "init says the node answers direct requests")
+        self.assertFalse([c for c in self.calls() if c == "settle" or c.startswith("delete")], "no option, nothing to wait for")
+        code, out = self.run_hubctl("create", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn(TLS_OPTIONS, self.obj("Ingress", "chefs-hubs", "hub-demo")["metadata"]["annotations"], "off by default")
+
+        self.write_env(TLS_MODE="origin", ORIGIN_PULLS="on")
+        self.log.write_text("")
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.obj("Ingress", "chefs-hubs", "hub-demo")["metadata"]["annotations"][TLS_OPTIONS], PULL_OPTIONS,
+                         "init brings a hub created earlier in line with .env")
+        option = self.apply_index("tlsoption/chefs-system/origin-pull")
+        settled = self.calls().index("settle")
+        self.assertLess(option, settled)
+        self.assertLess(settled, self.apply_index("ingress/chefs-hubs/hub-demo"), "Traefik knows the option before a hub names it")
+        self.assertLess(settled, self.apply_index("ingress/chefs-system/platform"))
+        self.log.write_text("")
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("settle", self.calls(), "an option Traefik already knows needs no wait")
+
+        self.write_env(TLS_MODE="origin", ORIGIN_PULLS="off")
+        self.log.write_text("")
+        code, out = self.run_hubctl("init")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn(TLS_OPTIONS, self.obj("Ingress", "chefs-hubs", "hub-demo")["metadata"]["annotations"])
+        self.assertNotIn(TLS_OPTIONS, self.obj("Ingress", "chefs-system", "platform")["metadata"]["annotations"])
+        self.assertNotIn("tlsoption/chefs-system/origin-pull", self.objects())
+        calls = self.calls()
+        delete = next(i for i, c in enumerate(calls) if c.startswith("delete tlsoptions.traefik.io origin-pull -n chefs-system"))
+        settled = calls.index("settle")
+        self.assertLess(self.apply_index("ingress/chefs-hubs/hub-demo"), settled)
+        self.assertLess(self.apply_index("ingress/chefs-system/platform"), settled)
+        self.assertLess(settled, delete, "Traefik has seen no Ingress names the option before it goes")
+        self.assertIn("secret/chefs-system/chefs-origin-pull-ca", self.objects(), "the operator's Secret stays")
 
     def test_r2_settings_become_the_backup_secret(self):
         self.write_env(R2_BUCKET="chefs-backups", R2_ACCOUNT_ID="acc123", R2_ACCESS_KEY_ID="id", R2_SECRET_ACCESS_KEY="sec")
@@ -878,9 +995,13 @@ class Render(HubctlCase):
         policies = (out_dir / "network-policies.yaml").read_text()
         self.assertIn("name: default-deny-ingress\n  namespace: chefs-system", policies)
         self.assertNotIn("buffering", traefik)
+        self.assertIn("kind: TLSOption\n", traefik, "the production shape requires Cloudflare's client certificate")
+        self.assertIn("clientAuthType: RequireAndVerifyClientCert", traefik)
         hub = (out_dir / "hub.example.yaml").read_text()
+        self.assertIn("ORIGIN_PULLS=on", hub)
         self.assertIn("jacob.chefslegacy.com", hub)
         self.assertIn("secretName: chefs-origin-tls", hub)
+        self.assertIn(f'{TLS_OPTIONS}: "{PULL_OPTIONS}"', hub)
         self.assertNotRegex(hub, r"[0-9a-f]{64}", "no real key in the example")
         backup = (out_dir / "backup-cronjob.yaml").read_text()
         self.assertNotIn("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY", backup, "no credentials in the reference set")
@@ -895,6 +1016,7 @@ class Render(HubctlCase):
             self.assertIn(f"kind: {kind}\n", platform)
         self.assertIn("- host: chefslegacy.com\n", platform, "the apex Ingress")
         self.assertIn("websecure", platform)
+        self.assertIn(f'{TLS_OPTIONS}: "{PULL_OPTIONS}"', platform)
         self.assertNotIn("/admin", platform)
         self.assertIn(f'PLATFORM_ADMIN_TOKEN: "{hubctl.PLATFORM_PLACEHOLDER}"', platform)
         self.assertNotRegex(platform, r"[0-9a-f]{64}", "no real token in the platform example")

@@ -9,8 +9,10 @@ section 5.6 and deploy/README.md. Settings live in ``<root>/.env`` (``--root``,
                    credentials Secret, the llm-gateway (Deployment, Service, PVC,
                    Secret with the vendor keys), the platform (hub registry, poller,
                    search; Deployment, Service, PVC, apex Ingress), the Origin CA
-                   certificate Secret (created by the operator), a default deny for
-                   ingress; later: provisioner
+                   certificate Secret (created by the operator), with ORIGIN_PULLS=on the
+                   CA Secret for Cloudflare's client certificate (created by the operator)
+                   and the TLSOption that requires it, a default deny for ingress;
+                   later: provisioner
     chefs-hubs     one Secret + StatefulSet + Service + Ingress + PVC per hub,
                    default-deny NetworkPolicies, hubctl's copy of the Origin CA Secret
     kube-system    Traefik's HelmChartConfig (cluster-wide: the node may host other
@@ -48,6 +50,13 @@ NS_SYSTEM = "chefs-system"
 NS_HUBS = "chefs-hubs"
 NS_TRAEFIK = "kube-system"
 ORIGIN_TLS_SECRET = "chefs-origin-tls"
+# Authenticated Origin Pulls (ORIGIN_PULLS=on): Traefik completes TLS for chefs hostnames only
+# when the client shows a certificate from the CA in this Secret, i.e. when it is Cloudflare.
+ORIGIN_PULL_CA_SECRET = "chefs-origin-pull-ca"
+ORIGIN_PULL_TLS_OPTION = "origin-pull"
+# Traefik's name for that TLSOption; hub Ingresses in chefs-hubs name the one in chefs-system,
+# so the apex and the hubs share one set of options.
+ORIGIN_PULL_OPTIONS = f"{NS_SYSTEM}-{ORIGIN_PULL_TLS_OPTION}@kubernetescrd"
 # Marks objects hubctl owns outside its namespaces; the Traefik guard in ensure_base looks for it.
 MANAGED_BY = {"app.kubernetes.io/managed-by": "hubctl"}
 HUB_UID = 65532
@@ -60,6 +69,9 @@ NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 MAGIC_PREFIX = "chefsprodigy-magic:"
 MAGIC_TTL_SECONDS = 600
 CRD_WAIT_SECONDS = 180
+# Traefik reads Kubernetes through separate providers (Ingresses, CRDs), each throttled (2 s by
+# default), so one change can reach its routers before another applied just earlier.
+TRAEFIK_SETTLE_SECONDS = 10
 # Copied into a hub's Secret when it calls the vendor directly (LLM_GATEWAY=off or no vendor key).
 HUB_ENV_PASSTHROUGH = (
     "LLM_MODEL", "LLM_API_KEY", "MINIMAX_API_KEY", "MINIMAX_ANTHROPIC_API_BASE",
@@ -314,6 +326,7 @@ class Config:
         self.domain = e.get("DOMAIN", "").strip().rstrip(".")
         self.hub_image = e.get("HUB_IMAGE", "ghcr.io/watchcat/chefsprodigy:latest")
         self.tls_mode = e.get("TLS_MODE", "origin")
+        self.origin_pulls_mode = e.get("ORIGIN_PULLS", "off").strip().lower()
         self.hub_storage = e.get("HUB_STORAGE", "2Gi")
         self.hub_mem_limit = e.get("HUB_MEM_LIMIT", "128Mi")
         self.hub_cpu_limit = e.get("HUB_CPU_LIMIT", "500m")
@@ -336,10 +349,18 @@ class Config:
             raise HubctlError(f"DOMAIN is not set in {env_path}")
         if self.tls_mode not in ("origin", "off"):
             raise HubctlError("TLS_MODE must be 'origin' (Cloudflare Origin CA) or 'off' (local tests)")
+        if self.origin_pulls_mode not in ("on", "off"):
+            raise HubctlError("ORIGIN_PULLS must be 'on' (Cloudflare Authenticated Origin Pulls) or 'off'")
+        if self.origin_pulls_mode == "on" and not self.tls:
+            raise HubctlError("ORIGIN_PULLS=on needs TLS_MODE=origin: the client certificate is checked in the TLS handshake")
 
     @property
     def tls(self) -> bool:
         return self.tls_mode == "origin"
+
+    @property
+    def origin_pulls(self) -> bool:
+        return self.tls and self.origin_pulls_mode == "on"
 
     @property
     def scheme(self) -> str:
@@ -369,6 +390,7 @@ class Config:
             "DOMAIN": "chefslegacy.com",
             "HUB_IMAGE": "ghcr.io/watchcat/chefsprodigy:latest",
             "TLS_MODE": "origin",
+            "ORIGIN_PULLS": "on",
             "LLM_MODEL": "minimax/MiniMax-M3",
             "MINIMAX_API_KEY": GATEWAY_PLACEHOLDER,
         })
@@ -521,9 +543,10 @@ def network_policies() -> List[dict]:
 
 
 def traefik_config(cfg: Config) -> List[dict]:
-    """k3s's Traefik is shared by every site on the node, so these values reach all of them:
-    Cloudflare's ranges as trusted proxies, http→https for every host, no access log. The
-    Origin CA certificate is not among them: each of hubctl's Ingresses names it."""
+    """k3s's Traefik is shared by every site on the node, so the HelmChartConfig's values reach
+    all of them: Cloudflare's ranges as trusted proxies, http→https for every host, no access
+    log. The Origin CA certificate and the origin-pull TLSOption are not among them: each of
+    hubctl's Ingresses names them, and other sites keep Traefik's defaults."""
     ranges = "\n".join(f"        - {r}" for r in CLOUDFLARE_RANGES)
     redirect = ""
     if cfg.tls:
@@ -550,7 +573,7 @@ def traefik_config(cfg: Config) -> List[dict]:
         "  access:\n"
         "    enabled: false\n"
     )
-    return [
+    objects = [
         {
             "apiVersion": "helm.cattle.io/v1", "kind": "HelmChartConfig",
             "metadata": meta("traefik", NS_TRAEFIK, dict(MANAGED_BY)),
@@ -562,6 +585,13 @@ def traefik_config(cfg: Config) -> List[dict]:
             "spec": {"headers": {"frameDeny": True, "contentTypeNosniff": True, "referrerPolicy": "strict-origin-when-cross-origin"}},
         },
     ]
+    if cfg.origin_pulls:
+        objects.append({
+            "apiVersion": "traefik.io/v1alpha1", "kind": "TLSOption",
+            "metadata": meta(ORIGIN_PULL_TLS_OPTION, NS_SYSTEM),
+            "spec": {"clientAuth": {"secretNames": [ORIGIN_PULL_CA_SECRET], "clientAuthType": "RequireAndVerifyClientCert"}},
+        })
+    return objects
 
 
 def backup_manifests(cfg: Config) -> List[dict]:
@@ -640,15 +670,19 @@ def backup_manifests(cfg: Config) -> List[dict]:
     return objects
 
 
-def hub_manifests(cfg: Config, name: str, values: Dict[str, str]) -> List[dict]:
-    """Secret + StatefulSet + Service + Ingress for one hub (spec 5.6)."""
-    labels = {"app": "hub", "hub": name}
-    sts_name = f"hub-{name}"
+def ingress_annotations(cfg: Config) -> Dict[str, str]:
     annotations = {
         "traefik.ingress.kubernetes.io/router.entrypoints": "websecure" if cfg.tls else "web",
         "traefik.ingress.kubernetes.io/router.middlewares": MIDDLEWARES,
     }
-    ingress_spec: dict = {
+    if cfg.origin_pulls:
+        annotations["traefik.ingress.kubernetes.io/router.tls.options"] = ORIGIN_PULL_OPTIONS
+    return annotations
+
+
+def hub_ingress(cfg: Config, name: str) -> dict:
+    sts_name = f"hub-{name}"
+    spec: dict = {
         "rules": [{
             "host": cfg.host(name),
             "http": {"paths": [{"path": "/", "pathType": "Prefix",
@@ -656,7 +690,18 @@ def hub_manifests(cfg: Config, name: str, values: Dict[str, str]) -> List[dict]:
         }],
     }
     if cfg.tls:
-        ingress_spec["tls"] = [{"hosts": [cfg.host(name)], "secretName": ORIGIN_TLS_SECRET}]
+        spec["tls"] = [{"hosts": [cfg.host(name)], "secretName": ORIGIN_TLS_SECRET}]
+    return {
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": meta(sts_name, NS_HUBS, {"app": "hub", "hub": name}, ingress_annotations(cfg)),
+        "spec": spec,
+    }
+
+
+def hub_manifests(cfg: Config, name: str, values: Dict[str, str]) -> List[dict]:
+    """Secret + StatefulSet + Service + Ingress for one hub (spec 5.6)."""
+    labels = {"app": "hub", "hub": name}
+    sts_name = f"hub-{name}"
     return [
         {
             "apiVersion": "v1", "kind": "Secret",
@@ -718,11 +763,7 @@ def hub_manifests(cfg: Config, name: str, values: Dict[str, str]) -> List[dict]:
             "metadata": meta(sts_name, NS_HUBS, labels),
             "spec": {"selector": labels, "ports": [{"name": "http", "port": 8080, "targetPort": "http"}]},
         },
-        {
-            "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
-            "metadata": meta(sts_name, NS_HUBS, labels, annotations),
-            "spec": ingress_spec,
-        },
+        hub_ingress(cfg, name),
     ]
 
 
@@ -861,6 +902,10 @@ def wait_for_traefik_crds(kube: Kube) -> bool:
         time.sleep(5)
 
 
+def settle_traefik() -> None:
+    time.sleep(TRAEFIK_SETTLE_SECONDS)
+
+
 def check_traefik_config(kube: Kube) -> None:
     """k3s reads one HelmChartConfig named traefik per node. On a node shared with another site
     it may be that site's, so hubctl replaces it only when it carries hubctl's label."""
@@ -902,21 +947,55 @@ def origin_tls_copy(kube: Kube) -> dict:
     }
 
 
+def check_origin_pull_ca(kube: Kube) -> None:
+    """ORIGIN_PULLS=on: the operator's Secret with the CA Traefik checks the client certificate
+    against (Cloudflare's global one or the zone's own; deploy/README.md section 2)."""
+    create = (f"kubectl -n {NS_SYSTEM} create secret generic {ORIGIN_PULL_CA_SECRET} "
+              "--from-file=ca.crt=<CA certificate>")
+    source = kube.get("secret", ORIGIN_PULL_CA_SECRET, NS_SYSTEM)
+    if source is None:
+        raise HubctlError(
+            f"ORIGIN_PULLS=on needs the CA of Cloudflare's client certificate as Secret {ORIGIN_PULL_CA_SECRET} in "
+            f"{NS_SYSTEM} ({create}); see deploy/README.md, or set ORIGIN_PULLS=off"
+        )
+    try:
+        pem = base64.b64decode((source.get("data") or {}).get("ca.crt", ""), validate=True).decode()
+    except ValueError:  # binascii.Error and UnicodeDecodeError both derive from it
+        pem = ""
+    if "-----BEGIN CERTIFICATE-----" not in pem:
+        raise HubctlError(f"Secret {NS_SYSTEM}/{ORIGIN_PULL_CA_SECRET} has no PEM certificate under ca.crt; "
+                          f"recreate it with {create}")
+
+
 def ensure_base(cfg: Config, kube: Kube) -> None:
     cfg.require()
     check_traefik_config(kube)
     kube.apply(namespaces())
     certificates = [origin_tls_copy(kube)] if cfg.tls else []
+    if cfg.origin_pulls:
+        check_origin_pull_ca(kube)
     if not wait_for_traefik_crds(kube):
         raise HubctlError(
             "Traefik's CRDs (middlewares.traefik.io) are not installed yet; k3s may still be installing "
             f"Traefik: kubectl -n {NS_TRAEFIK} get jobs (helm-install-traefik-crd, helm-install-traefik), "
             "then run this command again"
         )
+    pull_option = kube.get("tlsoptions.traefik.io", ORIGIN_PULL_TLS_OPTION, NS_SYSTEM) is not None
     kube.apply(network_policies() + traefik_config(cfg) + backup_manifests(cfg) + certificates)
+    # An Ingress may name the origin-pull option only once Traefik knows it, and the option may
+    # go only once Traefik has seen that no Ingress names it any more; otherwise those routes
+    # drop out for a moment ("unknown TLS options" when switching off in k3d).
+    if cfg.origin_pulls and not pull_option:
+        settle_traefik()
+    # Hubs created earlier follow .env too (the option named or not).
+    kube.apply([hub_ingress(cfg, name) for name in hub_names(kube)])
     if cfg.gateway_enabled:
         kube.apply(gateway_manifests(cfg, cfg.gateway_env()))
     kube.apply(platform_manifests(cfg, platform_env(cfg)))
+    if pull_option and not cfg.origin_pulls:
+        print("origin pulls switched off: waiting for Traefik before removing the TLSOption")
+        settle_traefik()
+        kube.delete("tlsoptions.traefik.io", ORIGIN_PULL_TLS_OPTION, NS_SYSTEM)
 
 
 # ----------------------------------------------------------------------------- gateway
@@ -1032,10 +1111,6 @@ def platform_manifests(cfg: Config, values: Dict[str, str]) -> List[dict]:
     checksum = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:16]
     storage = cfg.env.get("PLATFORM_STORAGE", "1Gi")
     mem_limit = cfg.env.get("PLATFORM_MEM_LIMIT", "128Mi")
-    annotations = {
-        "traefik.ingress.kubernetes.io/router.entrypoints": "websecure" if cfg.tls else "web",
-        "traefik.ingress.kubernetes.io/router.middlewares": MIDDLEWARES,
-    }
     paths = [{"path": path, "pathType": kind,
               "backend": {"service": {"name": PLATFORM, "port": {"number": 8080}}}}
              for path, kind in PLATFORM_PUBLIC_PATHS]
@@ -1114,7 +1189,7 @@ def platform_manifests(cfg: Config, values: Dict[str, str]) -> List[dict]:
         },
         {
             "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
-            "metadata": meta(PLATFORM, NS_SYSTEM, labels, annotations),
+            "metadata": meta(PLATFORM, NS_SYSTEM, labels, ingress_annotations(cfg)),
             "spec": ingress_spec,
         },
         {
@@ -1180,7 +1255,7 @@ def reference_manifests(cfg: Config) -> Dict[str, str]:
     """The checked-in deploy/k8s set: one YAML file per concern, production (origin TLS) shape."""
     header = (
         f"# Generated by `deploy/hubctl render --reference deploy/k8s` for DOMAIN={cfg.domain}, "
-        f"TLS_MODE={cfg.tls_mode}.\n"
+        f"TLS_MODE={cfg.tls_mode}, ORIGIN_PULLS={cfg.origin_pulls_mode}.\n"
         "# `hubctl init` and `hubctl create` apply these same objects; edit deploy/hubctl, not this file.\n"
         "# deploy/tests fails when the checked-in copy drifts from hubctl.\n"
     )
@@ -1212,6 +1287,12 @@ def cmd_init(cfg: Config, kube: Kube, args: argparse.Namespace) -> int:
         print(f"model gateway: {GATEWAY} at {GATEWAY_URL} holds {keys}; hubs get per-hub tokens")
     else:
         print("model gateway: off (LLM_GATEWAY=off or no vendor key in .env); hubs call the vendor directly")
+    if cfg.origin_pulls:
+        print(f"origin pulls: on; the apex and every hub accept only clients with a certificate from the CA "
+              f"in {NS_SYSTEM}/{ORIGIN_PULL_CA_SECRET}, i.e. Cloudflare")
+    elif cfg.tls:
+        print("origin pulls: off; requests sent straight to the node's address skip Cloudflare "
+              "(ORIGIN_PULLS=on, deploy/README.md section 2)")
     admin = "on (PLATFORM_ADMIN_TOKEN)" if cfg.env.get("PLATFORM_ADMIN_TOKEN") else "off, the CLI is used"
     print(f"platform: search at {apex_url(cfg)}/api/v1/search, hub registry and poller; admin API {admin}")
     names = hub_names(kube)

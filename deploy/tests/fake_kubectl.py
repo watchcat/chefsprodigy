@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A stand-in `kubectl` for hubctl's tests: keeps applied objects in a JSON state
-file (FAKE_KUBE_STATE), logs every invocation (FAKE_LOG) and answers the handful
+file (FAKE_KUBE_STATE), logs every invocation (FAKE_LOG; an `apply -f -` line ends with
+`# <kind>/<namespace>/<name> ...` for the objects it carried) and answers the handful
 of read commands hubctl uses. Pods are synthesized from stored StatefulSets and
 Deployments; `exec deploy/llm-gateway -- llm-gateway …` emulates the gateway CLI
 with hub tokens and usage rows kept under the state's "_gateway" key, and
@@ -48,6 +49,7 @@ KINDS = {
     "serviceaccount": "ServiceAccount", "role": "Role", "rolebinding": "RoleBinding",
     "deployment": "Deployment", "deployments": "Deployment", "deploy": "Deployment",
     "middleware": "Middleware", "tlsstore": "TLSStore", "helmchartconfig": "HelmChartConfig",
+    "tlsoption": "TLSOption", "tlsoptions": "TLSOption", "tlsoptions.traefik.io": "TLSOption",
 }
 
 
@@ -151,22 +153,26 @@ def platform_cli(state, args):
 
 
 def main(argv):
-    with LOG.open("a") as log:
-        log.write(" ".join(argv) + "\n")
     state = load()
     cmd = argv[0] if argv else ""
     ns = flag(argv, "-n") or flag(argv, "--namespace") or "default"
+    items = []
+    if cmd == "apply" and flag(argv, "-f") == "-":
+        doc = json.load(sys.stdin)
+        items = doc.get("items", []) if doc.get("kind") == "List" else [doc]
+        for item in items:
+            meta = item.setdefault("metadata", {})
+            if item["kind"] not in ("Namespace", "TLSStore", "HelmChartConfig") or meta.get("namespace"):
+                meta["namespace"] = meta.get("namespace") or ns
+    with LOG.open("a") as log:
+        applied = " ".join(key(i["kind"], i["metadata"].get("namespace", ""), i["metadata"]["name"]) for i in items)
+        log.write(" ".join(argv) + (f" # {applied}" if applied else "") + "\n")
 
     if cmd == "apply":
         src = flag(argv, "-f")
         if src == "-":
-            doc = json.load(sys.stdin)
-            items = doc.get("items", []) if doc.get("kind") == "List" else [doc]
             for item in items:
-                meta = item.setdefault("metadata", {})
-                item_ns = meta.get("namespace") or ns
-                if item["kind"] not in ("Namespace", "TLSStore", "HelmChartConfig") or meta.get("namespace"):
-                    meta["namespace"] = item_ns
+                meta = item["metadata"]
                 state[key(item["kind"], meta.get("namespace", ""), meta["name"])] = item
                 print(f"{item['kind'].lower()}/{meta['name']} configured")
             save(state)
