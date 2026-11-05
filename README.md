@@ -6,6 +6,11 @@ every ingredient to metric units with a canonical id, serves a phone-friendly we
 a Cook Mode, speaks MCP so your AI assistant can search and plan with your recipes, and
 translates recipes on demand into the language you read.
 
+Many hubs can be joined into one **aggregated site**: the workspace's second binary,
+`platform`, polls the public recipes of every registered hub and serves one search over
+all of them, translations included, with forks of the same dish grouped
+([The aggregated site](#the-aggregated-site)).
+
 ## Features
 
 - **Import from anywhere**: Schema.org JSON-LD pages (free, no model needed), unstructured
@@ -23,8 +28,8 @@ translates recipes on demand into the language you read.
 - **Multilingual content**: each recipe keeps its source language; viewing it in another
   language translates it once with the configured model, caches the result, and lets you
   correct it by hand. Search finds recipes through their translations.
-- **Federation ready**: deterministic `content_hash` per recipe and a public manifest for a
-  future aggregator.
+- **Federation**: deterministic `content_hash` per recipe and a public manifest of the
+  public recipes, which the aggregated site reads to index many hubs.
 - **Bring your own model**: any provider rig-core knows (MiniMax, Anthropic, OpenAI,
   Ollama, ...). Without one, everything still works except free-text import, photo import
   and translation.
@@ -71,10 +76,8 @@ design around this image is in [docs/SPEC-hosted-platform.md](docs/SPEC-hosted-p
 
 `deploy/` runs many hubs on one k3s node behind Cloudflare: `hubctl` (create, backup,
 restore, upgrade hubs), the `llm-gateway` (vendor keys stay there; hubs get per-hub tokens
-and usage is recorded), the `platform` on the apex (it polls every hub's federation manifest
-and serves one search over all public recipes, translated titles and tags included, with
-forks of the same dish grouped) and a nightly backup job to Cloudflare R2. The step-by-step
-how-to is [deploy/README.md](deploy/README.md).
+and usage is recorded), the aggregated site on the apex ([below](#the-aggregated-site)) and a
+nightly backup job to Cloudflare R2. The step-by-step how-to is [deploy/README.md](deploy/README.md).
 
 ### Configuration (`.env`)
 
@@ -109,6 +112,48 @@ how-to is [deploy/README.md](deploy/README.md).
   Remote clients use `http://host:8080/mcp` with `Authorization: Bearer $NODE_API_KEY`.
   Behind a reverse proxy set `NODE_PUBLIC_URL`; its host is then accepted on `/mcp` without
   listing it in `NODE_MCP_ALLOWED_HOSTS`.
+
+## The aggregated site
+
+`platform` (`crates/platform`, in the same image as `/usr/local/bin/platform`) is the site
+on the hosting domain's apex. It keeps a registry of hubs, reads each hub's federation
+manifest every 10 minutes (plus up to a minute of jitter; a failing hub is retried with
+backoff of up to an hour), fetches only the recipes and translations that changed, and
+drops what a hub unpublished. Only public recipes (`is_public`) ever leave a hub.
+
+- **Search page** at `/`: free text, an optional ingredient filter, English, Russian or
+  Dutch, result cards linking to the recipe on its hub, and a directory of hubs.
+  Dependency-free, with the hub's design tokens.
+- **`GET /api/v1/search?q=&ingredient=&lang=&limit=&offset=`**: one hit per dish, with forks
+  that share a `content_hash` listed in `also_at`. With `lang`, title and tags come in that
+  language when a hub has the translation and `matched_lang` says so: a search in Russian
+  finds a Dutch recipe through its Russian translation.
+- **`GET /api/v1/hubs`**: the public directory (name, chef, public URL, recipe count).
+- **`/health`**, and `/admin/*` (register, update, remove and poll hubs over HTTP) only when
+  `PLATFORM_ADMIN_TOKEN` is set; without it the admin API answers 503.
+
+Hubs are registered from the command line; there is no sign-up yet. Locally, next to a hub:
+
+```sh
+scripts/devbuild.sh --fresh                   # terminal 1: hub on :8080 with a public sample recipe
+cargo run -p platform -- serve --port 8091    # terminal 2: data/platform.db beside the hub's data
+cargo run -p platform -- add-hub demo --internal-url http://127.0.0.1:8080 --public-url http://127.0.0.1:8080
+cargo run -p platform -- poll                 # index now instead of waiting for the poller
+curl 'http://127.0.0.1:8091/api/v1/search?q=pho'
+```
+
+Then open `http://127.0.0.1:8091/`. Commands: `serve`, `add-hub` (running it again updates
+the hub), `remove-hub` (drops its index rows too), `poll [--hub NAME]`, `hubs` (last poll,
+last error, recipe count) and `healthcheck`. Settings: `PLATFORM_ADMIN_TOKEN`,
+`PLATFORM_POLL_INTERVAL_SECS` (600), `PLATFORM_POLL_JITTER_SECS` (60),
+`PLATFORM_BACKOFF_MAX_SECS` (3600), `PLATFORM_HTTP_TIMEOUT_SECS` (10), `PLATFORM_PORT`,
+`PLATFORM_DATA_DIR`. `platform.db` is only an index: registering the hubs again and one poll
+rebuild it.
+
+In hosting, `hubctl init` runs it in the cluster behind an apex `Ingress` that routes only
+`/`, `/assets`, `/api/v1/search`, `/api/v1/hubs` and `/health`, so `/admin` never leaves the
+cluster, and `hubctl create` registers every new hub ([deploy/README.md](deploy/README.md),
+section 3). Design: [docs/SPEC-hosted-platform.md](docs/SPEC-hosted-platform.md) §5.3.
 
 ## Development
 

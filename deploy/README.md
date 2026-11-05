@@ -102,7 +102,7 @@ $EDITOR /srv/chefslegacy/.env          # DOMAIN, HUB_IMAGE, model access, later 
      openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=chefslegacy.com origin pull CA" \
        -keyout aop-ca.key -out aop-ca.pem
      openssl req -newkey rsa:2048 -nodes -subj "/CN=Cloudflare origin pull" -keyout aop-client.key -out aop-client.csr
-     printf 'extendedKeyUsage=clientAuth\n' > aop-client.ext
+     printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=clientAuth\n' > aop-client.ext
      openssl x509 -req -in aop-client.csr -CA aop-ca.pem -CAkey aop-ca.key -CAcreateserial -days 1825 \
        -extfile aop-client.ext -out aop-client.pem
      kubectl -n chefs-system create secret generic chefs-origin-pull-ca --from-file=ca.crt=aop-ca.pem
