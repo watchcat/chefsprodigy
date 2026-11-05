@@ -1,15 +1,21 @@
 # Chef's Prodigy
 
-A self-hosted, AI-native recipe node: one small Rust binary that stores your recipes in
-SQLite, imports them from web pages, pasted text, photos or a Mealie backup, normalizes
-every ingredient to metric units with a canonical id, serves a phone-friendly web app with
-a Cook Mode, speaks MCP so your AI assistant can search and plan with your recipes, and
-translates recipes on demand into the language you read.
+Chef's Prodigy is a network of recipe sites for people who love to cook. Each cook has their
+own recipe collection at their own web address, and one shared site gathers the public
+recipes from all of them, so you can search every cook's recipes at once. You can search in your own language, even for
+recipes written in another one, and copies of the same dish are grouped together
+([The aggregated site](#the-aggregated-site)). Everything runs on one server. A hosting tool
+sets up and updates each collection, one service holds the AI keys and tracks how much each
+collection uses, and nightly backups are set up but won't save any recipes until the export
+feature is built ([Deploying hubs for others](#deploying-hubs-for-others)).
 
-Many hubs can be joined into one **aggregated site**: the workspace's second binary,
-`platform`, polls the public recipes of every registered hub and serves one search over
-all of them, translations included, with forks of the same dish grouped
-([The aggregated site](#the-aggregated-site)).
+Each collection is a small recipe app that people can also run on their own computer. You
+can add recipes from a website link, pasted text such as a social media caption, photos of
+a recipe card or cookbook page, or a backup from Mealie, another recipe app. It rewrites
+every ingredient in metric units under a standard name, so it can combine several recipes
+into one shopping list. It works well on a phone and has a Cook Mode with step timers that
+keeps the screen on while you cook. It can translate recipes into your language, and AI
+assistants like Claude can search your recipes and plan meals with them.
 
 ## Features
 
