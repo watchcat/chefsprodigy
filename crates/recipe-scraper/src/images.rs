@@ -64,16 +64,39 @@ impl ImageStore {
         }
     }
 
+    /// Store already-encoded cover bytes under `file_name`.
+    ///
+    /// This is the restore path: a cover taken from a backup archive is
+    /// already WebP, so it is written as it is rather than decoded and
+    /// re-encoded. The name must be a plain `.webp` file name.
+    pub fn save_cover_bytes(&self, file_name: &str, bytes: &[u8]) -> Result<(), ScraperError> {
+        if !is_cover_file_name(file_name) {
+            return Err(ScraperError::InvalidBackup(
+                "cover file name must be a plain .webp name".to_string(),
+            ));
+        }
+        std::fs::create_dir_all(&self.dir)?;
+        std::fs::write(self.dir.join(file_name), bytes)?;
+        Ok(())
+    }
+
     /// Absolute path for a served file name (`<id>.webp`). Returns `None` for
     /// anything that is not a plain `.webp` basename, which blocks traversal.
     pub fn file_path(&self, name: &str) -> Option<std::path::PathBuf> {
-        let stem = name.strip_suffix(".webp")?;
-        let valid = !stem.is_empty()
-            && stem
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        valid.then(|| self.dir.join(name))
+        is_cover_file_name(name).then(|| self.dir.join(name))
     }
+}
+
+/// Whether `name` is a plain `.webp` file name: a basename with no path
+/// parts, so joining it to a directory cannot escape that directory.
+pub fn is_cover_file_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".webp") else {
+        return false;
+    };
+    !stem.is_empty()
+        && stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Longest side of a photo after normalization, in pixels.

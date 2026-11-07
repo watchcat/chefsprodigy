@@ -357,9 +357,10 @@ deletes objects after 30 days. `hubctl backup all` (or one hub) runs the job imm
 and prints its log, which is also the way to check credentials.
 
 The job reads each hub's owner key from its Secret and calls `GET /api/v1/export` on the
-hub's cluster address; until the hub image includes that endpoint (story RN-30) the log says
-`export endpoint not available yet (RN-30); skipped`. Without `R2_*` the job still runs and
-reports `R2 not configured`.
+hub's cluster address; the endpoint answers with a zip holding `recipes.db` (and `images/`)
+at its top level. A hub whose image predates the endpoint answers `404` and the log says
+`export endpoint not available on this hub image; skipped`. Without `R2_*` the job still
+runs and reports `R2 not configured`.
 
 Restore replaces a hub's data with an archive that contains `recipes.db` (and `images/`) at
 its top level, which is what the export produces:
@@ -371,6 +372,11 @@ hubctl restore jacob jacob-20261027T031700Z.zip
 It scales the hub to zero, unpacks the archive into the volume through a short-lived helper
 pod, fixes ownership for uid 65532 and scales back up. The hub starts with the restored
 data (SQLite migrations run if the archive is older than the image).
+
+A running hub can also be restored through its own API: `POST /api/v1/import/export` with
+the archive in a `file` field. That path only works on an empty node, because restoring over
+existing recipes would mix two sets of rows and leave the recipe ids ambiguous; a node that
+already holds recipes answers `400`.
 
 The gateway's `gateway.db` (hub token hashes and usage counters) is not part of the nightly
 backup. Losing it costs the usage history; `hubctl gateway-token <name>` for each hub

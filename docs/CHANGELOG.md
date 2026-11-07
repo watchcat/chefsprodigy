@@ -4,6 +4,9 @@ Stories moved out of the Kanban `Done` column, newest first. Ids are never reuse
 
 ## Archived 2026-11-07
 
+### RN-57 · MCP: language parameter on tools (S)
+`search_recipes`, `get_recipe_details`, `build_smart_shopping_list` accept `language`; end-to-end stdio test with a fake translator.
+
 ### RN-56 · Backend: localized canonical ingredient labels (S)
 `canonical_terms` cache + `TranslationService::labels` (batches of 100, humanized fallback, no-LLM safe); `canonical_label` on ingredients of localized recipes and on shopping-list lines (`?lang=`/`Accept-Language`).
 

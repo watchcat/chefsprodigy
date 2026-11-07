@@ -8,6 +8,8 @@ use recipe_mcp::{ImportService, RecipeMcpServer, TranslationService};
 use recipe_scraper::images::ImageStore;
 use recipe_scraper::{HeuristicExtractor, RecipeImporter};
 
+use crate::api::backup::BackupService;
+
 /// Static identity of this node, exposed via the federation manifest.
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -161,6 +163,11 @@ impl AppState {
             self.inner.importer.clone(),
             self.inner.images.clone(),
         )
+    }
+
+    /// Backup and restore of this node's database and covers.
+    pub fn backup(&self) -> BackupService {
+        BackupService::new(self.inner.db.clone(), self.inner.images.clone())
     }
 
     /// Translation service bound to this node's database and model.

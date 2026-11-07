@@ -136,7 +136,7 @@ kubectl -n chefs-hubs get secret -l app=hub -o json \
         "http://hub-$name.chefs-hubs.svc:8080/api/v1/export" || echo 000)
       case "$code" in
         200) echo "hub $name: exported $(wc -c < "$out") bytes" ;;
-        404) echo "hub $name: export endpoint not available yet (RN-30); skipped"; rm -f "$out" ;;
+        404) echo "hub $name: export endpoint not available on this hub image; skipped"; rm -f "$out" ;;
         *)   echo "hub $name: export failed with HTTP $code"; rm -f "$out"; echo "$name" >> /work/.failed ;;
       esac
     done

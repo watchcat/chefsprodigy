@@ -263,6 +263,9 @@ at startup); the gateway and platform `Deployments` are updated the same way. A 
   `text/event-stream` responses as they arrive (RN-64).
 - `GET /api/v1/export` (owner): zip with `recipes.db` (VACUUM INTO) and `images/`; and
   `POST /api/v1/import/export` to restore into an empty node (RN-30).
+  Shipped 2026-11-07 (RN-30): the archive holds `recipes.db` at the zip root, so
+  `hubctl restore` unpacks it straight into the PVC's data directory; the restore
+  refuses a node that already holds recipes (`400`).
 - Dockerfile (RN-63): multi-stage build, distroless (`gcr.io/distroless/cc` or `static`)
   runtime, non-root user, `/data` volume, `HEALTHCHECK` through the binary's own
   subcommand, image under 30 MB compressed.

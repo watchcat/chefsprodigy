@@ -4,10 +4,12 @@
 //! embedded at compile time via `sqlx::migrate!`, then applied automatically
 //! by [`Db::open`]. Recipe persistence lives in [`recipes`].
 
+pub mod backup;
 pub mod error;
 pub mod pool;
 pub mod recipes;
 pub mod translations;
 
+pub use backup::RestoreReport;
 pub use error::DbError;
 pub use pool::{Db, MIGRATOR};

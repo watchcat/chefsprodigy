@@ -1,5 +1,6 @@
 //! REST API (`/api/v1`).
 
+pub mod backup;
 pub mod extract;
 pub mod federation;
 pub mod i18n;
@@ -22,6 +23,7 @@ pub fn router() -> Router<AppState> {
         .merge(import::router())
         .merge(shopping::router())
         .merge(i18n::router())
+        .merge(backup::router())
         .merge(crate::auth::router())
         .fallback(not_found)
 }

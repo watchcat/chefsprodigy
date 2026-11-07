@@ -14,6 +14,11 @@ pub enum DbError {
     /// A row could not be converted into a domain model.
     #[error("invalid data in database: {0}")]
     InvalidData(String),
+    /// The operation was refused because of the state of the database, not
+    /// because of a fault in it (e.g. restoring into a node that already
+    /// holds recipes).
+    #[error("{0}")]
+    Refused(String),
     /// JSON column (instructions / tags) failed to (de)serialize.
     #[error("json column error: {0}")]
     Json(#[from] serde_json::Error),

@@ -80,6 +80,17 @@ impl IntoResponse for ApiError {
 
 impl From<DbError> for ApiError {
     fn from(e: DbError) -> Self {
+        match e {
+            // The database is in a state that makes the request impossible,
+            // but nothing is broken: the caller asked for the wrong thing.
+            DbError::Refused(m) => Self::BadRequest(m),
+            other => Self::Internal(other.into()),
+        }
+    }
+}
+
+impl From<std::io::Error> for ApiError {
+    fn from(e: std::io::Error) -> Self {
         Self::Internal(e.into())
     }
 }
