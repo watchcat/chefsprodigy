@@ -13,6 +13,7 @@ use axum::routing::get;
 use node_server::health::{self, DEFAULT_TIMEOUT};
 use node_server::{AppState, NodeInfo, build_router};
 use recipe_db::Db;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 const BIN: &str = env!("CARGO_BIN_EXE_node-server");
@@ -43,13 +44,43 @@ async fn serve(app: Router) -> u16 {
     port
 }
 
-/// A port nothing listens on (bound once to find it, then released).
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
+/// A port nothing listens on, kept reserved for as long as the guard lives.
+///
+/// Binding port 0 and immediately dropping the socket would leave the port
+/// free, and a test running in parallel could claim it before the probe
+/// connects: the probe would then reach that other socket instead of failing,
+/// which is what made `fails_when_nothing_listens` flaky. Binding without
+/// `listen` keeps the port out of reach while connections to it still fail.
+fn closed_port() -> ClosedPort {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+    socket
+        .bind(&SockAddr::from(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))))
+        .unwrap();
+    let port = socket
         .local_addr()
         .unwrap()
-        .port()
+        .as_socket_ipv4()
+        .unwrap()
+        .port();
+    ClosedPort {
+        _socket: socket,
+        port,
+    }
+}
+
+/// Holds a bound-but-not-listening socket, keeping its port reserved.
+struct ClosedPort {
+    _socket: Socket,
+    port: u16,
+}
+
+impl ClosedPort {
+    fn port(&self) -> u16 {
+        self.port
+    }
 }
 
 #[tokio::test]
@@ -62,7 +93,8 @@ async fn passes_against_a_running_node() {
 
 #[tokio::test]
 async fn fails_when_nothing_listens() {
-    let port = free_port();
+    let closed = closed_port();
+    let port = closed.port();
     let err = health::check("127.0.0.1", port, DEFAULT_TIMEOUT)
         .await
         .unwrap_err();
@@ -143,7 +175,8 @@ async fn cli_exits_zero_when_the_node_is_healthy() {
 
 #[test]
 fn cli_exits_one_when_nothing_listens() {
-    let port = free_port();
+    let closed = closed_port();
+    let port = closed.port();
     let output = Command::new(BIN)
         .args(["healthcheck", "--port", &port.to_string()])
         .output()
@@ -159,7 +192,8 @@ fn cli_exits_one_when_nothing_listens() {
 
 #[test]
 fn cli_takes_the_port_from_node_port_like_serve_does() {
-    let port = free_port();
+    let closed = closed_port();
+    let port = closed.port();
     let output = Command::new(BIN)
         .arg("healthcheck")
         .env("NODE_PORT", port.to_string())

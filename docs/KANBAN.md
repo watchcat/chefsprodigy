@@ -65,6 +65,13 @@ _(empty)_
 
 ## Done
 
+### RN-79 · Test: the healthcheck probe's "nothing listens" port stays reserved (S)
+`crates/node-server/tests/healthcheck.rs` picked a port to probe by binding port 0 and dropping the socket, so the port was free again before the probe connected. A test running in parallel could claim it in that window, and the probe would reach that other socket instead of failing, making `fails_when_nothing_listens` flaky.
+- Acceptance: the healthcheck test binary passes 40 consecutive runs and 20 concurrent instances with no failure.
+
+
+- Done 2026-11-07: `free_port()` is replaced by `closed_port()`, which binds a socket without `listen` and keeps it alive for the duration of the probe. The port stays out of reach for other tests while connections to it still fail, so the probe sees the failure it is testing. The guard is held across the probe in all three call sites (`fails_when_nothing_listens`, `cli_exits_one_when_nothing_listens`, `cli_takes_the_port_from_node_port_like_serve_does`). `socket2` is already in the tree through axum, so the lockfile gains one line and no crate is fetched. Evidence: the unmodified test binary failed 8 times in 40 consecutive runs (and 4 in 15 in an earlier sample), the patched one failed 0 in 40; 20 concurrent instances of the patched binary failed 0. The failure was a TCP-level error ("sending the request", "reading the response") instead of a connection error, which is the signature of the probe reaching another socket.
+
 ### RN-78 · Heuristic: an ingredient named `egg` keeps its name (S)
 `heuristic_ingredient` consumed `egg` as a count word, so it was dropped from the ingredient name: "1 egg" became the id `unknown`, "1 egg white" became `white`, "1 egg yolk" became `yolk`, and a bare "egg" became `unknown`. The seeded dictionary holds `egg`, `eggs`, `egg_white` and `egg_yolk`, so those lines could not be labelled from it and fell through to the model.
 - Acceptance: "1 egg", "2 eggs", "1 egg white" and "1 egg yolk" normalize to the seeded ids with the piece count intact; "2 cloves garlic", "3 garlic cloves" and "1 large onion" keep their ids.
@@ -177,9 +184,3 @@ Library, recipe detail, and shopping-list requests now send the selected UI lang
 
 ### RN-57 · MCP: language parameter on tools (S)
 `search_recipes`, `get_recipe_details`, `build_smart_shopping_list` accept `language`; end-to-end stdio test with a fake translator.
-
-### RN-56 · Backend: localized canonical ingredient labels (S)
-`canonical_terms` cache + `TranslationService::labels` (batches of 100, humanized fallback, no-LLM safe); `canonical_label` on ingredients of localized recipes and on shopping-list lines (`?lang=`/`Accept-Language`).
-
-### RN-55 · Backend: search across translations (S)
-`q` matches `recipes_fts` and `translations_fts` (union, best rank, one row per recipe) in both search and count; `lang` on `GET /recipes` makes summaries use an existing translation and adds `translation_lang`.

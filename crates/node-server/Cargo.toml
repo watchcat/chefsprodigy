@@ -38,3 +38,4 @@ tower = { workspace = true }
 http-body-util = { workspace = true }
 zip = { workspace = true }
 image = { workspace = true }
+socket2 = { workspace = true }

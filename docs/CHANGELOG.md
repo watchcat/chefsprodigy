@@ -2,6 +2,14 @@
 
 Stories moved out of the Kanban `Done` column, newest first. Ids are never reused.
 
+## Archived 2026-11-07
+
+### RN-56 · Backend: localized canonical ingredient labels (S)
+`canonical_terms` cache + `TranslationService::labels` (batches of 100, humanized fallback, no-LLM safe); `canonical_label` on ingredients of localized recipes and on shopping-list lines (`?lang=`/`Accept-Language`).
+
+### RN-55 · Backend: search across translations (S)
+`q` matches `recipes_fts` and `translations_fts` (union, best rank, one row per recipe) in both search and count; `lang` on `GET /recipes` makes summaries use an existing translation and adds `translation_lang`.
+
 ## Archived 2026-10-30
 
 ### RN-58 · UI: message bundles and language switcher (M)

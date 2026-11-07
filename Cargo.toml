@@ -68,6 +68,7 @@ rust-embed = { version = "8.13", features = ["include-exclude", "debug-embed"] }
 mime_guess = "2.0"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+socket2 = "0.6"
 
 [profile.release]
 opt-level = "z"
