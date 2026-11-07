@@ -69,6 +69,35 @@ fn counts_pieces_and_cloves() {
 }
 
 #[test]
+fn an_ingredient_named_egg_keeps_its_name() {
+    // "egg" is the ingredient, not a count word: dropping it as the unit left
+    // the line unnamed ("unknown") or renamed it ("white", "yolk").
+    let i = heuristic_ingredient("1 egg");
+    assert_eq!((i.metric_amount, i.unit), (Some(1.0), MeasurementUnit::Pcs));
+    assert_eq!(i.canonical_id, "egg");
+
+    let i = heuristic_ingredient("2 eggs");
+    assert_eq!((i.metric_amount, i.unit), (Some(2.0), MeasurementUnit::Pcs));
+    assert_eq!(i.canonical_id, "eggs");
+
+    let i = heuristic_ingredient("1 egg white");
+    assert_eq!((i.metric_amount, i.unit), (Some(1.0), MeasurementUnit::Pcs));
+    assert_eq!(i.canonical_id, "egg_white");
+
+    let i = heuristic_ingredient("1 egg yolk");
+    assert_eq!((i.metric_amount, i.unit), (Some(1.0), MeasurementUnit::Pcs));
+    assert_eq!(i.canonical_id, "egg_yolk");
+
+    let i = heuristic_ingredient("1 whole egg");
+    assert_eq!((i.metric_amount, i.unit), (Some(1.0), MeasurementUnit::Pcs));
+    assert_eq!(i.canonical_id, "egg");
+
+    // A bare "egg" is still a named ingredient.
+    let i = heuristic_ingredient("egg");
+    assert_eq!(i.canonical_id, "egg");
+}
+
+#[test]
 fn unquantified_items_are_to_taste() {
     for raw in [
         "salt to taste",

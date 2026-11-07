@@ -31,6 +31,18 @@ fn unit_factor(word: &str) -> Option<(MeasurementUnit, f32)> {
     })
 }
 
+/// Whether the word counts the ingredient named after it: "2 cloves garlic"
+/// names garlic, so the count word is consumed as the unit and dropped from
+/// the name.
+///
+/// `egg` is a unit ("1 egg" is one piece) but not a count word: it is the
+/// ingredient itself. Dropping it left "1 egg" unnamed ("unknown") and
+/// renamed "1 egg white" to "white".
+fn is_count_word(word: &str) -> bool {
+    let w = word.trim_end_matches('.').to_lowercase();
+    w != "egg" && unit_factor(&w).is_some()
+}
+
 /// Words that describe preparation or size rather than the ingredient itself.
 const STOPWORDS: &[&str] = &[
     "a",
@@ -224,7 +236,7 @@ pub fn heuristic_ingredient(raw: &str) -> IngredientItem {
 
     let unit_word = pending_unit.or_else(|| {
         rest.first()
-            .filter(|w| unit_factor(w).is_some())
+            .filter(|w| is_count_word(w))
             .cloned()
             .inspect(|_| {
                 rest.remove(0);
