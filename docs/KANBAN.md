@@ -45,6 +45,18 @@ Federation endpoints are public by design but unthrottled.
 The < 20 MB RSS goal has never been measured (sandbox blocked `ps`). Required for the hosted platform (spec §7): sets hub density per VPS.
 - Acceptance: a script in `scripts/` prints RSS after startup and 50 requests; number recorded in README.
 
+### RN-80 · Import from a YouTube or TikTok link (M)
+`docs/SPEC-video-import.md`, story 1. `RecipeImporter::import_url` recognizes YouTube and TikTok links (`social.rs`, one reader per platform reading the watch or video page) and takes the cheapest source first: a linked page with Schema.org recipe data, then one caption call (`extract_from_post`), then the page that call names. Video cover, the video as `origin_url`, a partial recipe saved with an `import` note, and four coded errors (`unsupported_source` for Instagram, `video_unavailable`, `video_page_unreadable`, `no_recipe_found`) with messages in en, ru and nl.
+- Acceptance: a YouTube description holding the full recipe imports with cover and source in one model call; a TikTok caption linking to a JSON-LD page imports with no caption call; an ingredients-only caption is saved with `missing: ["instructions"]` and the app shows the note; the four errors answer with their codes; a link the model names that is not in the caption is never fetched; the `#[ignore]`d live check passes from the hosting node.
+
+### RN-81 · Gemini watches a YouTube video when the recipe is only spoken (M)
+`docs/SPEC-video-import.md`, story 2; needs RN-80. `LLM_VIDEO_MODEL` and `GEMINI_API_KEY` add a `VideoRecipeReader` that hands the canonical YouTube URL to Gemini when the caption and the linked pages gave no complete recipe. `VIDEO_IMPORT_MAX_SECONDS` (default 900) caps the cost; `/api/v1/health` reports `features.video_watch` and the app then shows the "link is sent to Google" line.
+- Acceptance: with the settings, a Short whose recipe is only spoken imports with ingredients and steps (`source: video`) and its token count is recorded; without them nothing differs from RN-80; an over-long video is not watched, and the saved partial or the `no_recipe_found` message says so; a failed watch still saves a partial; the Google notice shows only when the feature is on.
+
+### RN-82 · Gemini through the hosted gateway (L)
+`docs/SPEC-video-import.md`, story 3; needs RN-81 and a live hosted platform. The `llm-gateway` passes through only the Messages format today; hosted hubs need a Gemini passthrough that keeps the Google key in the gateway, and a per-hub allowance in video seconds.
+- Acceptance: its own spec first; then a hosted hub imports a spoken-only Short without holding a Google key, and the watch counts against the hub's video allowance.
+
 ---
 
 ## In Progress

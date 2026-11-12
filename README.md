@@ -6,8 +6,8 @@ recipes from all of them, so you can search every cook's recipes at once. You ca
 recipes written in another one, and copies of the same dish are grouped together
 ([The aggregated site](#the-aggregated-site)). Everything runs on one server. A hosting tool
 sets up and updates each collection, one service holds the AI keys and tracks how much each
-collection uses, and nightly backups are set up but won't save any recipes until the export
-feature is built ([Deploying hubs for others](#deploying-hubs-for-others)).
+collection uses, and a nightly job backs up every collection
+([Deploying hubs for others](#deploying-hubs-for-others)).
 
 Each collection is a small recipe app that people can also run on their own computer. You
 can add recipes from a website link, pasted text such as a social media caption, photos of
