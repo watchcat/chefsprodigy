@@ -1,6 +1,6 @@
 //! The MCP server: four tools over any rmcp transport.
 
-use recipe_core::{LocalizedRecipe, Recipe};
+use recipe_core::LocalizedRecipe;
 use recipe_db::Db;
 use recipe_scraper::RecipeImporter;
 use recipe_scraper::images::ImageStore;
@@ -12,7 +12,7 @@ use crate::tools::details::{GetRecipeDetailsParams, get_details};
 use crate::tools::import::{ImportRecipeParams, import};
 use crate::tools::search::{SearchRecipesOutput, SearchRecipesParams, search};
 use crate::tools::shopping::{BuildShoppingListParams, ShoppingList, build};
-use crate::{ImportService, McpToolError, TranslationService};
+use crate::{ImportService, ImportedRecipe, McpToolError, TranslationService};
 
 const INSTRUCTIONS: &str = "This node stores a home cook's recipes with normalized metric ingredients. \
 Use search_recipes to find candidates (optionally by pantry contents, exclusions and time budget), \
@@ -63,12 +63,12 @@ impl RecipeMcpServer {
 
     #[tool(
         name = "import_recipe",
-        description = "Import and normalize a recipe from a web page URL or from raw unstructured text, then save it to the node. Returns the stored recipe."
+        description = "Import and normalize a recipe from a web page URL, a YouTube or TikTok video link, or raw unstructured text, then save it to the node. Returns the stored recipe; for a video link `import` says which source it came from and whether the ingredients or the steps are missing."
     )]
     async fn import_recipe(
         &self,
         Parameters(params): Parameters<ImportRecipeParams>,
-    ) -> Result<Json<Recipe>, McpToolError> {
+    ) -> Result<Json<ImportedRecipe>, McpToolError> {
         import(&self.imports, params).await.map(Json)
     }
 

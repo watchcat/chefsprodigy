@@ -1,14 +1,14 @@
 //! `import_recipe`
 
-use recipe_core::Recipe;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{ImportService, McpToolError};
+use crate::{ImportService, ImportedRecipe, McpToolError};
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ImportRecipeParams {
-    /// Web page to import (Schema.org JSON-LD is used when present, otherwise the page text is extracted)
+    /// Web page to import (Schema.org JSON-LD is used when present, otherwise the page text is extracted), or a
+    /// YouTube or TikTok video link (a recipe page the caption links to, then the caption itself)
     #[serde(default)]
     pub source_url: Option<String>,
     /// Raw unstructured recipe text (social media caption, chat message, OCR output)
@@ -25,7 +25,7 @@ pub struct ImportRecipeParams {
 pub async fn import(
     service: &ImportService,
     p: ImportRecipeParams,
-) -> Result<Recipe, McpToolError> {
+) -> Result<ImportedRecipe, McpToolError> {
     let url = p
         .source_url
         .as_deref()
@@ -51,11 +51,11 @@ pub async fn import(
             })?;
             photos.push(bytes);
         }
-        return Ok(service.import_photos(photos, p.is_public).await?);
+        return Ok(service.import_photos(photos, p.is_public).await?.into());
     }
     match (url, text) {
         (Some(url), _) => Ok(service.import_url(url, p.is_public).await?),
-        (None, Some(text)) => Ok(service.import_text(text, None, p.is_public).await?),
+        (None, Some(text)) => Ok(service.import_text(text, None, p.is_public).await?.into()),
         (None, None) => Err(McpToolError::InvalidInput(
             "provide source_url, raw_text, or photo_paths".to_string(),
         )),

@@ -11,5 +11,5 @@ pub mod translations;
 
 pub use error::McpToolError;
 pub use server::RecipeMcpServer;
-pub use services::{ImportError, ImportService, MealieImportReport};
+pub use services::{ImportError, ImportService, ImportedRecipe, MealieImportReport};
 pub use translations::{BackfillReport, TranslationService};

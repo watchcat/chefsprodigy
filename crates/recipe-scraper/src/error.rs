@@ -36,4 +36,20 @@ pub enum ScraperError {
     NoRecipeInPhotos(String),
     #[error("{0} cannot read images; set LLM_MODEL to a vision-capable model")]
     ModelCannotSeeImages(String),
+    /// A link to a platform that gives a server nothing to import (Instagram).
+    #[error(
+        "links from {0} cannot be imported yet; paste the caption under \"From text\" or add screenshots under \"From photo\""
+    )]
+    UnsupportedSource(String),
+    /// The video exists for nobody without a sign-in: private, removed, age-restricted.
+    #[error("this video is not publicly available: {0}")]
+    PostUnavailable(String),
+    /// The video's page came back without the data the reader needs (blocked, new layout).
+    #[error(
+        "could not read the video's page ({0}); paste the caption under \"From text\" or add screenshots under \"From photo\""
+    )]
+    PostUnreadable(String),
+    /// Neither the caption nor a linked page holds an ingredient or a step.
+    #[error("no recipe found for this video: {0}")]
+    NoRecipeInPost(String),
 }

@@ -24,7 +24,7 @@
   "From photo": "From photo",
   "Mealie backup": "Mealie backup",
   "Recipe URL": "Recipe URL",
-  "Chef's Prodigy will look for recipe metadata first, then use the importer when needed.": "Chef's Prodigy will look for recipe metadata first, then use the importer when needed.",
+  "Paste a recipe page, or a YouTube or TikTok video link. Chef's Prodigy looks for recipe metadata first, then uses the importer when needed.": "Plak een receptpagina of een link naar een YouTube- of TikTok-video. Chef's Prodigy zoekt eerst naar receptmetadata en gebruikt zo nodig de importeur.",
   "Make this recipe public for future federation": "Make this recipe public for future federation",
   "Cancel": "Annuleren",
   "Import from link": "Import from link",
@@ -194,5 +194,11 @@
   "Your login session has expired. Sign in again to continue.": "Je inlogsessie is verlopen. Log opnieuw in om door te gaan.",
   "Visitors can browse public recipes. Sign in to add recipes to this node.": "Bezoekers kunnen openbare recepten bekijken. Log in om recepten aan deze node toe te voegen.",
   "Translation availability": "Beschikbaarheid van vertaling",
-  "Translations become available to visitors after the owner views this recipe in {language}.": "Vertalingen worden beschikbaar voor bezoekers nadat de eigenaar dit recept in {language} heeft bekeken."
+  "Translations become available to visitors after the owner views this recipe in {language}.": "Vertalingen worden beschikbaar voor bezoekers nadat de eigenaar dit recept in {language} heeft bekeken.",
+  "import.note.missing_instructions": "Het bijschrift noemt de ingrediënten maar niet de stappen; die staan waarschijnlijk alleen in de video.",
+  "import.note.missing_ingredients": "Het bijschrift geeft de stappen maar niet de ingrediënten; die staan waarschijnlijk alleen in de video.",
+  "import.error.unsupported_source": "Links van Instagram kunnen nog niet worden geïmporteerd. Plak het bijschrift onder ‘From text’ of voeg screenshots toe onder ‘From photo’.",
+  "import.error.video_unavailable": "Deze video is niet openbaar: hij is privé of verwijderd.",
+  "import.error.video_page_unreadable": "De pagina van deze video kon niet worden gelezen. Plak het bijschrift onder ‘From text’ of voeg screenshots toe onder ‘From photo’.",
+  "import.error.no_recipe_found": "Geen recept gevonden in het bijschrift van deze video. Staat het recept alleen in beeld of geluid, plak dan een transcript onder ‘From text’ of voeg screenshots toe onder ‘From photo’."
 }

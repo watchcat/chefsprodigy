@@ -1,4 +1,4 @@
-//! `/api/v1/import/*`: URL, raw text and Mealie backup imports.
+//! `/api/v1/import/*`: URL (recipe pages and video links), raw text, photo and Mealie backup imports.
 
 use axum::extract::{DefaultBodyLimit, Multipart, State};
 use axum::http::StatusCode;
@@ -52,8 +52,9 @@ async fn import_url(
     _owner: RequireOwner,
     JsonBody(req): JsonBody<UrlImportRequest>,
 ) -> Result<Response, ApiError> {
-    let recipe = state.imports().import_url(&req.url, req.is_public).await?;
-    Ok((StatusCode::CREATED, Json(recipe)).into_response())
+    // The recipe's own fields, plus `import` for a video link.
+    let imported = state.imports().import_url(&req.url, req.is_public).await?;
+    Ok((StatusCode::CREATED, Json(imported)).into_response())
 }
 
 async fn import_text(

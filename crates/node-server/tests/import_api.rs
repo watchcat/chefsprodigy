@@ -333,6 +333,10 @@ async fn import_url_uses_jsonld_stores_webp_cover_and_serves_it() {
     assert_eq!(body["servings"], 3);
     assert_eq!(body["cook_time_minutes"], 20);
     assert_eq!(body["origin_url"], format!("{base}/pho"));
+    assert!(
+        body.get("import").is_none(),
+        "only video links carry an import note: {body}"
+    );
     assert_eq!(body["ingredients"][0]["canonical_id"], "star_anise");
     assert_eq!(body["instructions"][0]["timer_seconds"], 1200);
     let id = body["id"].as_str().unwrap();
@@ -779,5 +783,241 @@ mod photos {
         let (status, out) = post_photos(&app, ct, body).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{out}");
         assert!(out["error"].as_str().unwrap().contains("image"));
+    }
+}
+
+mod video_links {
+    use super::*;
+    use recipe_scraper::llm::PostExtraction;
+    use recipe_scraper::social::SocialPost;
+
+    const TIKTOK: &str = "https://www.tiktok.com/@samplecook/video/7430634507935468843";
+
+    /// Reads every caption as a pasta recipe with ingredients and no steps, unless the
+    /// caption says there is nothing to cook.
+    struct CaptionLlm;
+
+    impl RecipeExtractor for CaptionLlm {
+        fn normalize_ingredients<'a>(
+            &'a self,
+            raw: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<IngredientItem>, ScraperError>> + Send + 'a>>
+        {
+            FakeLlm.normalize_ingredients(raw)
+        }
+
+        fn extract_recipe<'a>(
+            &'a self,
+            _markdown: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<ExtractedRecipeDraft, ScraperError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(ScraperError::Llm("no page extraction in this test".into())) })
+        }
+
+        fn extract_from_post<'a>(
+            &'a self,
+            post: &'a SocialPost,
+        ) -> Pin<Box<dyn Future<Output = Result<PostExtraction, ScraperError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let recipe =
+                    (!post.text.contains("nothing to cook")).then(|| ExtractedRecipeDraft {
+                        title: "Tomato pasta".into(),
+                        description: None,
+                        servings: Some(2),
+                        prep_time_minutes: None,
+                        cook_time_minutes: None,
+                        ingredients: ["1 yellow onion", "250 g pasta"]
+                            .iter()
+                            .map(|raw| IngredientItem {
+                                raw_text: (*raw).into(),
+                                metric_amount: Some(1.0),
+                                unit: MeasurementUnit::Pcs,
+                                canonical_id: raw.replace(' ', "_"),
+                                is_specialty: false,
+                                canonical_label: None,
+                            })
+                            .collect(),
+                        instructions: Vec::new(),
+                        tags: Vec::new(),
+                        language: None,
+                    });
+                Ok(PostExtraction {
+                    recipe,
+                    missing: Vec::new(),
+                    recipe_link: None,
+                })
+            })
+        }
+    }
+
+    fn tiktok_page(detail: Value) -> String {
+        let data = json!({"__DEFAULT_SCOPE__": {"webapp.video-detail": detail}});
+        format!(
+            r#"<html><body><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">{data}</script></body></html>"#
+        )
+    }
+
+    fn item(base: &str, desc: &str) -> Value {
+        json!({"statusCode": 0, "itemInfo": {"itemStruct": {
+            "desc": desc,
+            "textLanguage": "en",
+            "author": {"nickname": "Sample Cook", "uniqueId": "samplecook"},
+            // The first cover is gone; the second one loads.
+            "video": {"duration": 150, "cover": format!("{base}/cover-missing.jpg"), "originCover": format!("{base}/cover.png")}
+        }}})
+    }
+
+    /// A stand-in TikTok: one video with an ingredients-only caption, one with no
+    /// recipe, one removed, one whose page carries no data.
+    async fn video_site() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let page = |html: String| {
+            get(move || {
+                let html = html.clone();
+                async move { ([(header::CONTENT_TYPE, "text/html")], html) }
+            })
+        };
+        let site = Router::new()
+            .route(
+                "/@samplecook/video/7430634507935468843",
+                page(tiktok_page(item(
+                    &base,
+                    "ingredients: -1 yellow onion -250 g pasta",
+                ))),
+            )
+            .route(
+                "/@samplecook/video/1",
+                page(tiktok_page(item(&base, "nothing to cook here #fyp"))),
+            )
+            .route(
+                "/@samplecook/video/2",
+                page(tiktok_page(
+                    json!({"statusCode": 10204, "statusMsg": "item doesn't exist"}),
+                )),
+            )
+            .route(
+                "/@samplecook/video/3",
+                page("<html><body>Verify to continue</body></html>".to_string()),
+            )
+            .route(
+                "/cover.png",
+                get(|| async { ([(header::CONTENT_TYPE, "image/png")], png(900, 1600)) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, site).await.unwrap() });
+        base
+    }
+
+    async fn video_app(base: &str) -> (Router, PathBuf) {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("node-import-video-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(dir.join("recipes.db")).await.unwrap();
+        let state = AppState::new(
+            db,
+            NodeInfo {
+                author_did: None,
+                chef_name: "T".into(),
+            },
+        )
+        .with_importer(
+            RecipeImporter::new(Arc::new(CaptionLlm))
+                .allow_private_hosts()
+                .with_social_origins(base, base),
+        )
+        .with_image_dir(dir.join("images"));
+        (build_router(state), dir)
+    }
+
+    #[tokio::test]
+    async fn a_video_link_saves_a_partial_recipe_with_a_note_and_the_first_cover_that_loads() {
+        let base = video_site().await;
+        let (app, dir) = video_app(&base).await;
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/api/v1/import/url",
+            Some(json!({"url": format!("{TIKTOK}?lang=en&is_from_webapp=1")})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["title"], "Tomato pasta");
+        assert_eq!(
+            body["origin_url"], TIKTOK,
+            "the video is the source, without its query"
+        );
+        assert_eq!(body["ingredients"].as_array().unwrap().len(), 2);
+        assert_eq!(body["instructions"], json!([]));
+        assert_eq!(body["language"], "en");
+        assert_eq!(body["import"]["source"], "caption");
+        assert_eq!(body["import"]["missing"], json!(["instructions"]));
+        assert!(
+            body["import"]["note"].as_str().unwrap().contains("steps"),
+            "{body}"
+        );
+        let id = body["id"].as_str().unwrap();
+        assert_eq!(
+            body["image_path"],
+            format!("images/{id}.webp"),
+            "the second cover candidate was stored"
+        );
+        assert!(dir.join("images").join(format!("{id}.webp")).exists());
+
+        let (status, stored) = send(&app, "GET", &format!("/api/v1/recipes/{id}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            stored.get("import").is_none(),
+            "the note is not part of the recipe"
+        );
+    }
+
+    #[tokio::test]
+    async fn video_link_failures_answer_with_their_codes() {
+        let base = video_site().await;
+        let (app, _dir) = video_app(&base).await;
+        for (url, expected, code, needle) in [
+            (
+                "https://www.instagram.com/reel/CyjUMFjP1BB/",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_source",
+                "Instagram",
+            ),
+            (
+                "https://www.tiktok.com/@samplecook/video/2",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "video_unavailable",
+                "not publicly available",
+            ),
+            (
+                "https://www.tiktok.com/@samplecook/video/3",
+                StatusCode::BAD_GATEWAY,
+                "video_page_unreadable",
+                "From text",
+            ),
+            (
+                "https://www.tiktok.com/@samplecook/video/1",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "no_recipe_found",
+                "no recipe found",
+            ),
+        ] {
+            let (status, body) = send(
+                &app,
+                "POST",
+                "/api/v1/import/url",
+                Some(json!({"url": url})),
+            )
+            .await;
+            assert_eq!(status, expected, "{url}: {body}");
+            assert_eq!(body["code"], code, "{url}: {body}");
+            assert!(
+                body["error"].as_str().unwrap().contains(needle),
+                "{url}: {body}"
+            );
+        }
+        let (_, list) = send(&app, "GET", "/api/v1/recipes", None).await;
+        assert_eq!(list["total"], 0, "nothing is stored on failure: {list}");
     }
 }

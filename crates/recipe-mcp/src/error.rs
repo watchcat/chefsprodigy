@@ -32,9 +32,9 @@ impl From<ScraperError> for McpToolError {
             ScraperError::LlmUnavailable
             | ScraperError::ModelCannotSeeImages(_)
             | ScraperError::ModelQuotaExceeded(_) => Self::Unavailable(e.to_string()),
-            ScraperError::EmptyInput | ScraperError::BlockedUrl { .. } => {
-                Self::InvalidInput(e.to_string())
-            }
+            ScraperError::EmptyInput
+            | ScraperError::BlockedUrl { .. }
+            | ScraperError::UnsupportedSource(_) => Self::InvalidInput(e.to_string()),
             ScraperError::NoRecipeInPhotos(_) => Self::Import(e.to_string()),
             other => Self::Import(other.to_string()),
         }

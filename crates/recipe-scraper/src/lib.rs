@@ -18,6 +18,7 @@ pub mod llm;
 pub mod mealie;
 pub mod normalize;
 pub mod sanitize;
+pub mod social;
 pub mod ssrf;
 
 pub use error::ScraperError;

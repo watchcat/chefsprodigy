@@ -22,6 +22,12 @@ pub enum ApiError {
     QuotaExceeded(String),
     /// A required capability (e.g. the LLM) is not configured.
     ServiceUnavailable(String),
+    /// A failure with a stable `code` the UI translates (video-link imports).
+    Coded {
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+    },
     Internal(anyhow::Error),
 }
 
@@ -39,7 +45,16 @@ impl ApiError {
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::QuotaExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Coded { status, .. } => *status,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn coded(status: StatusCode, code: &'static str, message: String) -> Self {
+        Self::Coded {
+            status,
+            code,
+            message,
         }
     }
 }
@@ -60,6 +75,14 @@ impl IntoResponse for ApiError {
                 tracing::warn!(status = %status, error = %m, "upstream failure");
                 m.clone()
             }
+            Self::Coded {
+                status, message, ..
+            } => {
+                if status.is_server_error() {
+                    tracing::warn!(status = %status, error = %message, "upstream failure");
+                }
+                message.clone()
+            }
             Self::NotFound(m)
             | Self::BadRequest(m)
             | Self::Unauthorized(m)
@@ -73,6 +96,9 @@ impl IntoResponse for ApiError {
         if matches!(self, Self::QuotaExceeded(_)) {
             // A stable code so the UI can say "quota" without parsing the message.
             body["code"] = json!("model_quota_exceeded");
+        }
+        if let Self::Coded { code, .. } = &self {
+            body["code"] = json!(code);
         }
         (status, Json(body)).into_response()
     }
@@ -106,6 +132,26 @@ impl From<ScraperError> for ApiError {
                 Self::ServiceUnavailable(e.to_string())
             }
             ScraperError::NoRecipeInPhotos(_) => Self::Unprocessable(e.to_string()),
+            ScraperError::UnsupportedSource(_) => Self::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_source",
+                e.to_string(),
+            ),
+            ScraperError::PostUnavailable(_) => Self::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "video_unavailable",
+                e.to_string(),
+            ),
+            ScraperError::PostUnreadable(_) => Self::coded(
+                StatusCode::BAD_GATEWAY,
+                "video_page_unreadable",
+                e.to_string(),
+            ),
+            ScraperError::NoRecipeInPost(_) => Self::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "no_recipe_found",
+                e.to_string(),
+            ),
             ScraperError::Llm(m) => Self::BadGateway(format!("llm failure: {m}")),
             ScraperError::ModelQuotaExceeded(_) => Self::QuotaExceeded(e.to_string()),
             ScraperError::TranslationIncomplete(m) => {

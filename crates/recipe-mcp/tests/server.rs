@@ -24,17 +24,17 @@ async fn setup() -> (RunningService<RoleClient, ()>, Db) {
 }
 
 async fn setup_with(extractor: Arc<dyn RecipeExtractor>) -> (RunningService<RoleClient, ()>, Db) {
+    // Stand-in sites run on loopback, which the SSRF guard refuses by default.
+    setup_importer(RecipeImporter::new(extractor).allow_private_hosts()).await
+}
+
+async fn setup_importer(importer: RecipeImporter) -> (RunningService<RoleClient, ()>, Db) {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir: PathBuf =
         std::env::temp_dir().join(format!("recipe-mcp-test-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = Db::open(dir.join("recipes.db")).await.unwrap();
-    let server = RecipeMcpServer::new(
-        db.clone(),
-        // Stand-in sites run on loopback, which the SSRF guard refuses by default.
-        RecipeImporter::new(extractor).allow_private_hosts(),
-        ImageStore::new(dir.join("images")),
-    );
+    let server = RecipeMcpServer::new(db.clone(), importer, ImageStore::new(dir.join("images")));
 
     let (client_io, server_io) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
@@ -409,6 +409,10 @@ async fn import_recipe_from_jsonld_site_persists_recipe() {
         .await,
     );
     assert_eq!(out["title"], "Net Toast");
+    assert!(
+        out.get("import").is_none(),
+        "only video links carry an import note: {out}"
+    );
     assert_eq!(out["servings"], 2);
     assert_eq!(out["is_public"], true);
     assert_eq!(out["ingredients"][0]["canonical_id"], "bread");
@@ -463,6 +467,130 @@ async fn import_recipe_reports_model_quota_exhaustion_readably() {
             .await
             .unwrap()
             .is_empty()
+    );
+    client.cancel().await.unwrap();
+}
+
+/// Reads a caption as two ingredients and no steps.
+struct IngredientsOnly;
+
+impl RecipeExtractor for IngredientsOnly {
+    fn normalize_ingredients<'a>(
+        &'a self,
+        _raw: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<IngredientItem>, ScraperError>> + Send + 'a>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn extract_recipe<'a>(
+        &'a self,
+        _markdown: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<ExtractedRecipeDraft, ScraperError>> + Send + 'a>> {
+        Box::pin(async { Err(ScraperError::Llm("no page extraction in this test".into())) })
+    }
+
+    fn extract_from_post<'a>(
+        &'a self,
+        _post: &'a recipe_scraper::social::SocialPost,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<recipe_scraper::llm::PostExtraction, ScraperError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Ok(recipe_scraper::llm::PostExtraction {
+                recipe: Some(ExtractedRecipeDraft {
+                    title: "Tomato pasta".into(),
+                    description: None,
+                    servings: None,
+                    prep_time_minutes: None,
+                    cook_time_minutes: None,
+                    ingredients: vec![
+                        ing("yellow_onion", Some(1.0), MeasurementUnit::Pcs, false),
+                        ing("pasta", Some(250.0), MeasurementUnit::G, false),
+                    ],
+                    instructions: Vec::new(),
+                    tags: Vec::new(),
+                    language: None,
+                }),
+                missing: Vec::new(),
+                recipe_link: None,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn import_recipe_from_a_video_link_says_what_is_missing() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let data = json!({"__DEFAULT_SCOPE__": {"webapp.video-detail": {"statusCode": 0, "itemInfo": {"itemStruct": {
+                    "desc": "ingredients: -1 yellow onion -250 g pasta",
+                    "author": {"nickname": "Sample Cook"},
+                    "video": {"duration": 150}
+                }}}}});
+                let body = format!(
+                    r#"<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">{data}</script>"#
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    let (client, db) = setup_importer(
+        RecipeImporter::new(Arc::new(IngredientsOnly))
+            .allow_private_hosts()
+            .with_social_origins(&base, &base),
+    )
+    .await;
+
+    let video = "https://www.tiktok.com/@samplecook/video/7430634507935468843";
+    let out = structured(
+        &call(
+            &client,
+            "import_recipe",
+            json!({"source_url": format!("{video}?lang=en")}),
+        )
+        .await,
+    );
+    assert_eq!(out["title"], "Tomato pasta");
+    assert_eq!(out["origin_url"], video);
+    assert_eq!(out["import"]["source"], "caption");
+    assert_eq!(out["import"]["missing"], json!(["instructions"]));
+    assert!(
+        out["import"]["note"].as_str().unwrap().contains("steps"),
+        "{out}"
+    );
+    assert!(
+        db.get_recipe(out["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let err = error_text(
+        &call(
+            &client,
+            "import_recipe",
+            json!({"source_url": "https://www.instagram.com/reel/CyjUMFjP1BB/"}),
+        )
+        .await,
+    );
+    assert!(
+        err.contains("Instagram") && err.contains("From text"),
+        "{err}"
     );
     client.cancel().await.unwrap();
 }

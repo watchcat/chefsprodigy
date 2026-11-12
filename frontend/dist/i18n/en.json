@@ -24,7 +24,7 @@
   "From photo": "From photo",
   "Mealie backup": "Mealie backup",
   "Recipe URL": "Recipe URL",
-  "Chef's Prodigy will look for recipe metadata first, then use the importer when needed.": "Chef's Prodigy will look for recipe metadata first, then use the importer when needed.",
+  "Paste a recipe page, or a YouTube or TikTok video link. Chef's Prodigy looks for recipe metadata first, then uses the importer when needed.": "Paste a recipe page, or a YouTube or TikTok video link. Chef's Prodigy looks for recipe metadata first, then uses the importer when needed.",
   "Make this recipe public for future federation": "Make this recipe public for future federation",
   "Cancel": "Cancel",
   "Import from link": "Import from link",
@@ -194,5 +194,11 @@
   "Your login session has expired. Sign in again to continue.": "Your login session has expired. Sign in again to continue.",
   "Visitors can browse public recipes. Sign in to add recipes to this node.": "Visitors can browse public recipes. Sign in to add recipes to this node.",
   "Translation availability": "Translation availability",
-  "Translations become available to visitors after the owner views this recipe in {language}.": "Translations become available to visitors after the owner views this recipe in {language}."
+  "Translations become available to visitors after the owner views this recipe in {language}.": "Translations become available to visitors after the owner views this recipe in {language}.",
+  "import.note.missing_instructions": "The caption lists the ingredients but not the steps; they are probably only in the video.",
+  "import.note.missing_ingredients": "The caption gives the steps but not the ingredients; they are probably only in the video.",
+  "import.error.unsupported_source": "Links from Instagram can't be imported yet. Paste the caption under “From text” or add screenshots under “From photo”.",
+  "import.error.video_unavailable": "This video isn't public: it is private or was removed.",
+  "import.error.video_page_unreadable": "Couldn't read this video's page. Paste the caption under “From text” or add screenshots under “From photo”.",
+  "import.error.no_recipe_found": "No recipe found in this video's caption. If the recipe is only spoken or shown, paste a transcript under “From text” or add screenshots under “From photo”."
 }

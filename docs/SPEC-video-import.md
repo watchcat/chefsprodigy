@@ -28,6 +28,14 @@ without a login, and Meta's embed endpoint only "View this post on Instagram". R
 watch and video pages is not an official interface: either platform can block or change it,
 so every failure must point the cook to **From text** and **From photo**.
 
+**Found while building RN-80 (2026-11-12):** after a handful of requests the hosting node
+(a hosting provider's address) got YouTube's sign-in wall, `playabilityStatus.status`
+`LOGIN_REQUIRED` with "sign in to confirm you're not a bot", for two of three public videos,
+while the third read normally and a home connection read all three. TikTok read from both.
+So on a hosted hub a YouTube link can fail with `video_page_unreadable` for a video anyone
+can watch; a self-hosted node on a home connection is not affected. The durable fix for
+hosting is YouTube's official Data API as the source for descriptions (RN-83, below).
+
 ## User flow
 1. The cook pastes the link into **From link** (or an assistant calls `import_recipe` with
    `url`). No new tab; the hint under the field mentions YouTube and TikTok.
@@ -84,8 +92,10 @@ from the model's word.
 At most four linked pages are fetched per import (three in the free pass, one named by the
 model). Without `LLM_MODEL` step 2 still works; step 3 answers the existing 503.
 
-Title: the draft's, else the YouTube title, else the existing synthesized title. Language:
-the draft's, else TikTok's `textLanguage`, then `fill_language` as for every import. Cover
+Title: the draft's, else the YouTube title, else the existing synthesized title, else
+"Untitled recipe" for a steps-only draft. Language: the draft's, else TikTok's
+`textLanguage`, then `fill_language` as for every import, then the offline detector over
+the caption itself (a short ingredient list often does not tell the language). Cover
 candidates, in order: YouTube `maxresdefault.jpg` then `hqdefault.jpg` for the video id;
 TikTok `video.cover` then `video.originCover` (signed, so fetched during the import); last,
 the linked page's own image. `ImportResult.image_url` becomes an ordered list and
@@ -98,8 +108,11 @@ so tests run on saved pages and a platform change touches one file.
 
 - **YouTube:** the JSON object after `ytInitialPlayerResponse = ` (read with a streaming
   `serde_json` deserializer, which stops at the end of the object): `videoDetails.title`,
-  `.author`, `.shortDescription`, `.lengthSeconds`. `playabilityStatus.status` other than
-  `OK` means not public; its `reason` is localized and is not parsed.
+  `.author`, `.shortDescription`, `.lengthSeconds`. `playabilityStatus.status`
+  `LOGIN_REQUIRED` is unreadable, not unavailable: YouTube answers it for private and
+  age-restricted videos and also, as a bot check, for public ones, and the page does not
+  say which. Any other status than `OK` means not public. The `reason` is localized and
+  is not parsed.
 - **TikTok:** the JSON in `<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">`, under
   `__DEFAULT_SCOPE__["webapp.video-detail"]`: `statusCode` 0 with
   `itemInfo.itemStruct.desc`, `.textLanguage`, `.author.nickname`, `.author.uniqueId`,
@@ -130,26 +143,29 @@ lenient reader. The heuristic extractor returns `LlmUnavailable`.
 the response carries one more member next to the recipe's fields:
 
 ```json
-"import": { "source": "linked_page" | "caption" | "video", "missing": ["instructions"], "watch_skipped": "too_long" }
+"import": { "source": "linked_page" | "caption" | "video", "missing": ["instructions"], "note": "…", "watch_skipped": "too_long" }
 ```
 
-`missing` is empty for a complete recipe; `watch_skipped` appears only in story 2. New
+`missing` is empty for a complete recipe, and `note` (one English sentence saying what is
+missing) is present only otherwise; the app shows its own translated sentence. The source
+`video` and `watch_skipped` appear only in story 2. New
 errors, each with a `code` in the body like `model_quota_exceeded` has today; the app
 shows a translated message per code (en, ru, nl) and falls back to the server's text:
 
 | `code` | Status | `ScraperError` | When |
 |---|---|---|---|
 | `unsupported_source` | 422 | `UnsupportedSource` | an Instagram link |
-| `video_unavailable` | 422 | `PostUnavailable` | private, removed, age-restricted, dead share link |
-| `video_page_unreadable` | 502 | `PostUnreadable` | the page came back without the expected data |
+| `video_unavailable` | 422 | `PostUnavailable` | removed or private, dead share link, a `404` from the platform |
+| `video_page_unreadable` | 502 | `PostUnreadable` | the page came back without the expected data, YouTube's sign-in wall, a page over 4 MB, any other error status |
 | `no_recipe_found` | 422 | `NoRecipeInPost` | no ingredient and no step anywhere |
 
 Unchanged: `400` from the SSRF guard, `502` for a failed fetch, `503` without a model, `429`
 for a model quota.
 
 ## MCP
-`import_recipe` with a video `url` takes the same path; its text result adds one sentence
-when something is missing. The four errors map to the tool's import error with their text.
+`import_recipe` with a video `source_url` takes the same path; its result carries the same
+`import` member, whose `note` is the sentence for the agent. The four errors come back as
+tool errors with their text.
 
 ## Story 2: Gemini watches a YouTube video
 - **Settings:** `LLM_VIDEO_MODEL` (a catalog reference whose `ModelSpec` lists video input;
@@ -207,10 +223,12 @@ hosted hubs run story 1.
 - **API and app:** statuses and codes of the four errors, the `import` member, the note in
   the import dialog, message keys in `en`, `ru` and `nl` (`scripts/i18n-check.py`).
 - **Live check:** an `#[ignore]`d test, `social_live` in `recipe-scraper`, run with
-  `cargo test -p recipe-scraper --test social_live -- --ignored`. It reads one real YouTube
-  video, one Short and one TikTok through the guarded client and asserts a caption and a
-  cover. Outside CI; run before a release and from the hosting node, because these pages
-  change without notice.
+  `cargo test -p recipe-scraper --test social_live -- --ignored --nocapture`. It reads one
+  real YouTube video, one Short and one TikTok through the guarded client and asserts a
+  caption, a length and a cover that downloads. With `SOCIAL_LIVE_PAGES=<dir>` it parses
+  pages saved on another machine instead (the hosting node has no Rust toolchain: fetch the
+  three pages there with the importer's `USER_AGENT` and parse them here). Outside CI; run
+  before a release, because these pages change without notice.
 - **Story 2:** a fake `VideoRecipeReader` for the watch step and its failure paths; one
   manual run with a real key on a Short whose recipe is only spoken, tokens recorded.
 
@@ -220,9 +238,16 @@ hosted hubs run story 1.
 | RN-80: link import for YouTube and TikTok | M | a YouTube description with the full recipe imports with cover and source in one model call; a TikTok caption linking to a JSON-LD page imports with no caption call; an ingredients-only caption is saved with `missing: ["instructions"]` and the app shows the note; the four errors answer with their codes; a model-named link outside the caption is never fetched; the live check passes from the hosting node |
 | RN-81: Gemini watches a YouTube video | M | with the settings, a Short whose recipe is only spoken imports with ingredients and steps (`source: video`) and its token count is recorded; without them nothing differs from story 1; an over-long video is not watched, and the saved partial or the `no_recipe_found` message says so; a failed watch still saves a partial; the Google notice shows only when the feature is on |
 | RN-82: Gemini through the hosted gateway | L | own spec |
+| RN-83: YouTube descriptions through the official Data API | M | with a key, the videos that got the sign-in wall from the hosting node import there; without a key nothing differs from RN-80; a removed video still answers `video_unavailable`; the key never appears in a log line or an error message |
 
 ## Out of scope
 Instagram; uploaded video files; downloading video or audio; caption tracks; comments
 (some creators pin the recipe there); TikTok photo posts; importing from the phone's share
-menu; a creator-name field; playlists and channels; YouTube's official Data API as a
-second source for descriptions (a fallback to add if the watch page gets blocked).
+menu; a creator-name field; playlists and channels.
+
+RN-83, not built yet and needed for hosted hubs: YouTube's official Data API
+(`videos.list?part=snippet,contentDetails`, a free key, one quota unit per video of the
+10,000 a project gets per day) as the source for title, description, length and cover when
+`YOUTUBE_API_KEY` is set, with the watch page as the keyless default. It answers any
+address, which the watch page does not. It does not give what is said in a video (RN-81),
+and TikTok has nothing like it.

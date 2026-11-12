@@ -60,10 +60,10 @@ Retrieves the complete recipe, dynamically scaling ingredient quantities if `tar
   * `language` (`string`, optional — display language; translates wording on demand and adds `canonical_label`).
 
 ### MCP Tool 3: `import_recipe`
-Imports and normalizes a recipe from a URL or raw unstructured text using the `recipe-scraper` pipeline (`Schema.org` JSON-LD first, rig structured-output extraction as fallback) and persists it to SQLite.
+Imports and normalizes a recipe from a URL or raw unstructured text using the `recipe-scraper` pipeline (`Schema.org` JSON-LD first, rig structured-output extraction as fallback) and persists it to SQLite. A YouTube or TikTok video link takes the video-link ladder (`docs/SPEC-video-import.md`); the result then carries the same `import` member as the REST endpoint, whose `note` tells in one sentence what is missing.
 
 * **Input Parameters:**
-  * `source_url` (`string`, optional)
+  * `source_url` (`string`, optional — a recipe page, or a YouTube or TikTok video link)
   * `raw_text` (`string`, optional — used when importing from social media captions, chat messages, or OCR text)
   * `photo_paths` (`string[]`, optional — local image files read with the vision model; stdio clients only)
   * `is_public` (`boolean`, default `false`)
@@ -136,6 +136,7 @@ Rules:
 
 ### Import & Migration
 * `POST /api/v1/import/url` — Body: `{ "url": "https://...", "is_public": true }`. Runs `recipe-scraper`. URLs that are not `http`/`https` or that point (directly, through DNS or through a redirect) at loopback, private, link-local/cloud-metadata, multicast or unspecified addresses are refused with `400` and an error starting `refusing to fetch` (SSRF guard, RN-74); unreachable public sites answer `502`.
+  * **Video links** (RN-80, `docs/SPEC-video-import.md`): a YouTube (`watch`, `youtu.be`, Shorts, `live`, `embed`) or TikTok (video page or share link) URL is read cheapest source first: a recipe page the caption links to that has JSON-LD (no caption call), then one model call on the caption, then the page that call names. The recipe is saved with the video as `origin_url` (query dropped) and the video's cover. The `201` body then carries, next to the recipe's fields, `"import": { "source": "linked_page" | "caption", "missing": [], "note": "…" }`; `missing` lists `ingredients` or `instructions` when the caption held only the other (the recipe is saved as it is) and `note` is present only then. Errors carry a `code` like `model_quota_exceeded`: `422 unsupported_source` (an Instagram link), `422 video_unavailable` (private, removed, dead share link), `502 video_page_unreadable` (the platform answered without the expected data, including YouTube's sign-in wall), `422 no_recipe_found` (no ingredient and no step in the caption or a linked page). Without `LLM_MODEL` only the JSON-LD step works; the caption step answers `503`.
 * `POST /api/v1/import/text` — Body: `{ "text": "...", "origin_url": null }`. Runs the rig structured-output extractor; returns `503` with a hint when `LLM_MODEL` is unset.
 * `POST /api/v1/import/mealie-backup` — `multipart/form-data` accepting a Mealie `.zip` archive. Returns `{ "imported_count": 42, "failed_count": 0, "errors": [] }`.
 * `POST /api/v1/import/photo` — `multipart/form-data` with 1–6 image files in field `photos` (repeatable) and an optional `is_public` text field. Photos are oriented, downscaled to 1600 px and sent to the vision model in one call; the first photo showing the dish becomes the cover. Returns `201` with the recipe. Errors: `400` (no/too many photos, not an image), `422` (no recipe found in the photos), `502` (model failure), `503` (model cannot read images or no `LLM_MODEL`). Design: `docs/SPEC-photo-import.md`.

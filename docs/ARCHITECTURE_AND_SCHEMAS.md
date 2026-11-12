@@ -330,11 +330,32 @@ the same to recipes imported before the column existed, without touching `update
 4. Errors: `422` when no recipe is found in the photos, `503` when the configured model
    cannot see images or no model is configured, `502` for an unusable model reply.
 
+### Stage 4: Video links (`POST /api/v1/import/url`, `docs/SPEC-video-import.md`)
+`RecipeImporter::import_url` hands a YouTube or TikTok link (`social::SocialLink::parse`) to
+a ladder that stops at the first complete recipe (an ingredient and a step):
+1. Fetch the watch or video page through the guarded client (4 MB cap) and read it with the
+   platform's reader (`social/youtube.rs`: the `ytInitialPlayerResponse` object;
+   `social/tiktok.rs`: the `__UNIVERSAL_DATA_FOR_REHYDRATION__` JSON) into a `SocialPost`:
+   title, creator, caption, links, cover candidates, length, language.
+2. Fetch up to three links from the caption (`social::candidate_links` drops social networks,
+   shops and music services); the first page with a complete JSON-LD recipe is imported as in
+   Stage 1, with no caption call.
+3. One `RecipeExtractor::extract_from_post` call on the caption (never page HTML) returns a
+   draft and the caption link that leads to the written recipe; that page, and only a link
+   the caption itself holds, then goes through `import_html`.
+4. A draft that still lacks its ingredients or its steps is saved as it is.
+
+`ImportResult.report` (`ImportReport { source, missing, note }`) tells the caller which rung
+won and what is missing; `ImportResult.image_urls` lists cover candidates, the video's own
+first. An Instagram link, a video that is not public, a page without the expected data and a
+post without a recipe are their own `ScraperError`s. `RecipeImporter::with_social_origins`
+points the readers at a stand-in site in tests.
+
 ### LLM configuration (`crates/recipe-scraper/src/llm.rs`)
 
 The extractor is behind the `RecipeExtractor` trait (`normalize_ingredients`,
-`extract_recipe`, `extract_from_photos`, `detect_language`, `translate_recipe`,
-`translate_terms`, plus `supports_images` / `supports_translation` capability flags) so the
+`extract_recipe`, `extract_from_photos`, `extract_from_post`, `detect_language`,
+`translate_recipe`, `translate_terms`, plus `supports_images` / `supports_translation` capability flags) so the
 importer runs with a fake in tests and with heuristics when no model is configured.
 
 | Variable | Meaning |

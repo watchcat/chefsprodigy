@@ -104,10 +104,8 @@ async fn html_with_jsonld_uses_structured_data_and_only_normalizes_ingredients()
         vec!["vietnamese", "soup", "dinner"],
         "tags deduplicated, lowercase"
     );
-    assert_eq!(
-        result.image_url.as_deref(),
-        Some("https://example.com/pho.jpg")
-    );
+    assert_eq!(result.image_urls, vec!["https://example.com/pho.jpg"]);
+    assert_eq!(result.report, None, "only video links carry a report");
 
     assert_eq!(r.ingredients.len(), 4);
     assert_eq!(r.ingredients[1].canonical_id, "llm_anise");
@@ -216,13 +214,13 @@ async fn relative_image_urls_are_resolved_against_origin() {
         .await
         .unwrap();
     assert_eq!(
-        result.image_url.as_deref(),
-        Some("https://blog.example.com/img/cover.jpg")
+        result.image_urls,
+        vec!["https://blog.example.com/img/cover.jpg"]
     );
 
     let result = importer.import_html(html, None).await.unwrap();
-    assert_eq!(
-        result.image_url, None,
+    assert!(
+        result.image_urls.is_empty(),
         "unresolvable relative URL is dropped"
     );
 }

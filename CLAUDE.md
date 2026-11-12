@@ -37,7 +37,7 @@ Strictly adhere to the following modular Workspace layout:
 ├── crates/
 │   ├── recipe-core/            # Domain models, DTOs, JSON Schemas, content_hash logic
 │   ├── recipe-db/              # sqlx SQLite pool, repositories, FTS5 search queries
-│   ├── recipe-scraper/         # Schema.org parser + htmd + rig structured-output extractor + Mealie (.zip) importer
+│   ├── recipe-scraper/         # Schema.org parser + htmd + rig structured-output extractor + video-link readers (YouTube, TikTok) + Mealie (.zip) importer
 │   ├── recipe-mcp/             # MCP Tools + shared ImportService (rig agents consume the MCP tools via the rig-rmcp crate)
 │   ├── node-server/            # Binary: Axum HTTP/SSE server, CLI (stdio MCP mode), rust-embed static UI
 │   ├── llm-gateway/            # Binary: LLM gateway for hosted hubs (vendor key custody, hub tokens, usage; Messages passthrough)

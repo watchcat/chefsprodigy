@@ -24,7 +24,7 @@
   "From photo": "From photo",
   "Mealie backup": "Mealie backup",
   "Recipe URL": "Recipe URL",
-  "Chef's Prodigy will look for recipe metadata first, then use the importer when needed.": "Chef's Prodigy will look for recipe metadata first, then use the importer when needed.",
+  "Paste a recipe page, or a YouTube or TikTok video link. Chef's Prodigy looks for recipe metadata first, then uses the importer when needed.": "Вставьте ссылку на страницу с рецептом или на видео YouTube или TikTok. Chef's Prodigy сначала ищет метаданные рецепта, а при необходимости использует импортёр.",
   "Make this recipe public for future federation": "Make this recipe public for future federation",
   "Cancel": "Отмена",
   "Import from link": "Import from link",
@@ -194,5 +194,11 @@
   "Your login session has expired. Sign in again to continue.": "Срок действия сеанса истёк. Войдите снова, чтобы продолжить.",
   "Visitors can browse public recipes. Sign in to add recipes to this node.": "Гости могут просматривать общедоступные рецепты. Войдите, чтобы добавлять рецепты на этот узел.",
   "Translation availability": "Доступность перевода",
-  "Translations become available to visitors after the owner views this recipe in {language}.": "Перевод станет доступен гостям после того, как владелец откроет этот рецепт на языке {language}."
+  "Translations become available to visitors after the owner views this recipe in {language}.": "Перевод станет доступен гостям после того, как владелец откроет этот рецепт на языке {language}.",
+  "import.note.missing_instructions": "В подписи к видео есть ингредиенты, но нет шагов приготовления: вероятно, они есть только в самом видео.",
+  "import.note.missing_ingredients": "В подписи к видео есть шаги приготовления, но нет ингредиентов: вероятно, они есть только в самом видео.",
+  "import.error.unsupported_source": "Ссылки из Instagram пока нельзя импортировать. Вставьте подпись на вкладке «From text» или добавьте скриншоты на вкладке «From photo».",
+  "import.error.video_unavailable": "Это видео недоступно: оно закрыто или удалено.",
+  "import.error.video_page_unreadable": "Не удалось прочитать страницу этого видео. Вставьте подпись на вкладке «From text» или добавьте скриншоты на вкладке «From photo».",
+  "import.error.no_recipe_found": "В подписи к этому видео нет рецепта. Если рецепт только звучит или показан в видео, вставьте расшифровку на вкладке «From text» или добавьте скриншоты на вкладке «From photo»."
 }

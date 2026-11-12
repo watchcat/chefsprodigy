@@ -325,10 +325,10 @@
     main.focus({ preventScroll: true });
   }
 
-  function showToast(message, tone = "default") {
+  function showToast(message, tone = "default", duration = 4200) {
     const toast = create("div", { className: `toast${tone === "error" ? " toast-error" : ""}`, text: message, attributes: { role: "status" } });
     toastRegion.append(toast);
-    window.setTimeout(() => toast.remove(), 4200);
+    window.setTimeout(() => toast.remove(), duration);
   }
 
   function isOwner() {
@@ -474,9 +474,11 @@
 
   async function responseError(response) {
     let message = `The recipe node returned ${response.status}.`;
+    let code = null;
     try {
       const body = await response.json();
       if (body && typeof body.error === "string" && body.error.trim()) message = body.error;
+      if (body && typeof body.code === "string") code = body.code;
     } catch {
       try {
         const text = await response.text();
@@ -487,7 +489,29 @@
     }
     const error = new Error(message);
     error.status = response.status;
+    if (code) error.code = code;
     return error;
+  }
+
+  // Video-link imports fail with a stable code; show its translated message, else the node's own text.
+  const IMPORT_ERROR_MESSAGES = {
+    unsupported_source: "import.error.unsupported_source",
+    video_unavailable: "import.error.video_unavailable",
+    video_page_unreadable: "import.error.video_page_unreadable",
+    no_recipe_found: "import.error.no_recipe_found",
+  };
+
+  function importErrorMessage(error) {
+    const key = error && Object.hasOwn(IMPORT_ERROR_MESSAGES, error.code) ? IMPORT_ERROR_MESSAGES[error.code] : null;
+    return key ? t(key) : error.message;
+  }
+
+  // What a video link's caption did not hold, as a sentence; null when the recipe is complete.
+  function importNote(recipe) {
+    const missing = safeArray(recipe && recipe.import && recipe.import.missing);
+    if (missing.includes("instructions") && !missing.includes("ingredients")) return t("import.note.missing_instructions");
+    if (missing.includes("ingredients") && !missing.includes("instructions")) return t("import.note.missing_ingredients");
+    return null;
   }
 
   function parseRoute() {
@@ -2048,9 +2072,11 @@
       form.reset();
       window.setTimeout(() => closeImportDialog(), 300);
       showToast(`Added ${stringValue(recipe.title, "your recipe")} to the library.`);
+      const note = importNote(recipe);
+      if (note) showToast(note, "default", 12000);
       navigate(`/recipe/${encodeURIComponent(recipe.id)}`);
     } catch (error) {
-      status.textContent = error.message;
+      status.textContent = importErrorMessage(error);
     } finally {
       submitButton.disabled = false;
     }

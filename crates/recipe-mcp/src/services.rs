@@ -3,9 +3,10 @@
 use recipe_core::{Recipe, RecipeInput};
 use recipe_db::{Db, DbError};
 use recipe_scraper::images::{ImageStore, MAX_PHOTOS, NormalizedPhoto, normalize_photo};
-use recipe_scraper::importer::input_from_draft;
+use recipe_scraper::importer::{ImportReport, input_from_draft};
 use recipe_scraper::mealie::read_mealie_backup;
 use recipe_scraper::{RecipeImporter, ScraperError};
+use schemars::JsonSchema;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -21,6 +22,26 @@ pub enum ImportError {
     Db(#[from] DbError),
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// A stored import: the recipe and, for a video link, how it was read.
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq)]
+pub struct ImportedRecipe {
+    #[serde(flatten)]
+    pub recipe: Recipe,
+    /// For a YouTube or TikTok link: which source the recipe came from and what
+    /// no source held. Absent for every other import.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import: Option<ImportReport>,
+}
+
+impl From<Recipe> for ImportedRecipe {
+    fn from(recipe: Recipe) -> Self {
+        Self {
+            recipe,
+            import: None,
+        }
+    }
 }
 
 /// Result of a Mealie backup import.
@@ -52,9 +73,13 @@ impl ImportService {
         &self.db
     }
 
-    /// Validate, fetch, import and persist a recipe from `url`, attaching its
-    /// cover image when one can be downloaded and converted.
-    pub async fn import_url(&self, url: &str, is_public: bool) -> Result<Recipe, ImportError> {
+    /// Validate, fetch, import and persist a recipe from `url`, attaching the
+    /// first of its cover candidates that can be downloaded and converted.
+    pub async fn import_url(
+        &self,
+        url: &str,
+        is_public: bool,
+    ) -> Result<ImportedRecipe, ImportError> {
         let parsed = url::Url::parse(url.trim())
             .map_err(|e| ImportError::InvalidUrl(format!("invalid url: {e}")))?;
         if !matches!(parsed.scheme(), "http" | "https") {
@@ -65,17 +90,24 @@ impl ImportService {
         let result = self.importer.import_url(parsed.as_str()).await?;
         let mut input = result.recipe;
         input.is_public = is_public;
-        let recipe = self.db.create_recipe(input).await?;
-        let Some(image_url) = result.image_url else {
-            return Ok(recipe);
-        };
-        match self.importer.fetch_bytes(&image_url).await {
-            Ok(bytes) => Ok(self.attach_cover(recipe, bytes).await),
-            Err(e) => {
-                tracing::warn!(error = %e, url = %image_url, "cover image download failed");
-                Ok(recipe)
+        let mut recipe = self.db.create_recipe(input).await?;
+        for image_url in &result.image_urls {
+            match self.importer.fetch_bytes(image_url).await {
+                Ok(bytes) => {
+                    recipe = self.attach_cover(recipe, bytes).await;
+                    if recipe.image_path.is_some() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, url = %image_url, "cover image download failed");
+                }
             }
         }
+        Ok(ImportedRecipe {
+            recipe,
+            import: result.report,
+        })
     }
 
     /// Import unstructured text (captions, chat messages) and persist it.

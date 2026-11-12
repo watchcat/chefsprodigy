@@ -19,10 +19,12 @@ assistants like Claude can search your recipes and plan meals with them.
 
 ## Features
 
-- **Import from anywhere**: Schema.org JSON-LD pages (free, no model needed), unstructured
-  text (social captions, chat messages), photos of recipe cards or cookbook pages with the
-  finished dish as cover, and Mealie 1.x backups. URL fetches pass an SSRF guard: nothing
-  on loopback, private or cloud-metadata ranges is ever requested, redirects included.
+- **Import from anywhere**: Schema.org JSON-LD pages (free, no model needed), YouTube and
+  TikTok video links (a recipe page the caption links to, else the caption itself, with the
+  video's cover), unstructured text (social captions, chat messages), photos of recipe cards
+  or cookbook pages with the finished dish as cover, and Mealie 1.x backups. URL fetches
+  pass an SSRF guard: nothing on loopback, private or cloud-metadata ranges is ever
+  requested, redirects included.
 - **3-tier ingredients**: original wording, metric amount and unit, snake_case canonical id
   with a specialty flag, so shopping lists can be merged and split between the supermarket
   and the specialty store.

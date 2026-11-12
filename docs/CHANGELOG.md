@@ -2,6 +2,13 @@
 
 Stories moved out of the Kanban `Done` column, newest first. Ids are never reused.
 
+## Archived 2026-11-12
+
+### RN-59 · UI: translated recipe content and corrections (M)
+Library, recipe detail, and shopping-list requests now send the selected UI language as `lang`. Localized titles, tags, ingredient labels, and shopping labels render from the server response. Recipe detail shows translation provenance, permits a source-wording toggle, displays a translation loading state, and offers `#/recipe/{id}/translation` to save ordered human wording corrections through the documented translation endpoint; retained human corrections show a stale-source hint after source edits.
+- Verified in-browser 2026-10-24 via `scripts/devbuild.sh`: a Dutch `Hollandse stamppot` card rendered in Russian, opened with its human-translation provenance, toggled to its Dutch source and back, and saved a corrected Russian ingredient. The correction survived a reload; after a source-recipe `PUT`, it remained visible with the Russian stale-source hint. Browser console had no errors.
+- Follow-up verified in-browser 2026-10-24 after updating the static PWA shell: the saved Torchiette recipe rendered its Russian title, ingredient wording, and method after selecting Russian, and remained Russian after reload with `html[lang="ru"]` and `localStorage["ui.lang"] = "ru"`.
+
 ## Archived 2026-11-07
 
 ### RN-57 · MCP: language parameter on tools (S)
