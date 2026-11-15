@@ -71,6 +71,15 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 socket2 = "0.6"
 
+# Dev builds: line tables for our crates, no debug info for dependencies. On macOS
+# every codegen unit's object file stays in target/ for the debugger, and with full
+# debug info on dependencies that ran to tens of GB.
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = 0
+
 [profile.release]
 opt-level = "z"
 lto = true
